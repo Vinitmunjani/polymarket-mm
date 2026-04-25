@@ -1,0 +1,237 @@
+"""
+Configuration loader and validator.
+
+Loads YAML config with environment variable substitution,
+validates all required parameters, and provides typed access.
+"""
+
+import os
+import re
+import yaml
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+
+@dataclass
+class AssetConfig:
+    """Per-asset trading parameters."""
+    enabled: bool = True
+    symbol: str = ""
+    default_sigma: float = 0.60
+    gamma: float = 0.30
+    gamma_near_expiry: float = 1.0
+    min_spread: float = 0.04
+    max_spread: float = 0.25
+    max_order_size: int = 30
+    max_dollar_delta: float = 50.0
+    soft_limit: float = 25.0
+    hard_limit: float = 40.0
+    emergency: float = 48.0
+
+
+@dataclass
+class GlobalConfig:
+    """Global trading parameters."""
+    refresh_interval: int = 1
+    stop_quoting_seconds: int = 120
+    reduce_size_seconds: int = 300
+    reprice_threshold: float = 0.005
+    max_daily_loss_pct: float = 0.05
+    max_drawdown_pct: float = 0.03
+    max_capital_per_market: float = 200.0
+    total_capital: float = 200.0
+    market_discovery_interval: int = 30
+    vol_lookback_seconds: int = 300
+    kappa_window_seconds: int = 300
+
+
+@dataclass
+class CredentialsConfig:
+    """API credentials."""
+    # Polymarket
+    private_key: str = ""
+    api_key: str = ""
+    api_secret: str = ""
+    api_passphrase: str = ""
+    chain_id: int = 137
+    host: str = "https://clob.polymarket.com"
+    # Binance
+    binance_ws_url: str = "wss://stream.binance.com:9443/ws"
+    binance_rest_url: str = "https://api.binance.com/api/v3"
+
+
+@dataclass
+class RegimeConfig:
+    """Market regime filter parameters."""
+    lookback: int = 20
+    trend_threshold: float = 0.015
+    spike_threshold: float = 0.03
+
+
+@dataclass
+class ToxicityConfig:
+    """Adverse selection monitoring parameters."""
+    window_seconds: int = 300
+    threshold: float = 0.002
+    edge_adverse_rate: float = 0.60
+    edge_window: int = 30
+
+
+@dataclass
+class DryRunConfig:
+    """Dry-run simulation parameters."""
+    fill_probability: float = 0.60
+    fill_delay_min: int = 2
+    fill_delay_max: int = 10
+    toxicity_multiplier: float = 2.0
+
+
+@dataclass
+class BotConfig:
+    """Root configuration object."""
+    mode: str = "dry-run"
+    credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
+    assets: Dict[str, AssetConfig] = field(default_factory=dict)
+    global_params: GlobalConfig = field(default_factory=GlobalConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
+    toxicity: ToxicityConfig = field(default_factory=ToxicityConfig)
+    dry_run: DryRunConfig = field(default_factory=DryRunConfig)
+
+
+def _substitute_env_vars(value: str) -> str:
+    """Replace ${ENV_VAR} patterns with environment variable values."""
+    if not isinstance(value, str):
+        return value
+    pattern = re.compile(r'\$\{(\w+)\}')
+    def replacer(match):
+        env_var = match.group(1)
+        return os.environ.get(env_var, "")
+    return pattern.sub(replacer, value)
+
+
+def _recursive_env_sub(obj):
+    """Recursively substitute env vars in a dict/list structure."""
+    if isinstance(obj, dict):
+        return {k: _recursive_env_sub(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_recursive_env_sub(item) for item in obj]
+    elif isinstance(obj, str):
+        return _substitute_env_vars(obj)
+    return obj
+
+
+def load_config(config_path: str = "config/default.yaml",
+                override_path: Optional[str] = None) -> BotConfig:
+    """
+    Load configuration from YAML files with env var substitution.
+
+    Args:
+        config_path: Path to default config file.
+        override_path: Optional path to override config (e.g., live.yaml).
+
+    Returns:
+        Fully populated BotConfig instance.
+    """
+    with open(config_path, 'r') as f:
+        raw = yaml.safe_load(f)
+
+    # Apply overrides if provided
+    if override_path and os.path.exists(override_path):
+        with open(override_path, 'r') as f:
+            overrides = yaml.safe_load(f)
+        if overrides:
+            raw = _deep_merge(raw, overrides)
+
+    # Substitute environment variables
+    raw = _recursive_env_sub(raw)
+
+    # Build typed config
+    config = BotConfig()
+    config.mode = raw.get("mode", "dry-run")
+
+    # Credentials
+    creds_raw = raw.get("credentials", {})
+    pm = creds_raw.get("polymarket", {})
+    bn = creds_raw.get("binance", {})
+    config.credentials = CredentialsConfig(
+        private_key=pm.get("private_key", ""),
+        api_key=pm.get("api_key", ""),
+        api_secret=pm.get("api_secret", ""),
+        api_passphrase=pm.get("api_passphrase", ""),
+        chain_id=pm.get("chain_id", 137),
+        host=pm.get("host", "https://clob.polymarket.com"),
+        binance_ws_url=bn.get("ws_url", "wss://stream.binance.com:9443/ws"),
+        binance_rest_url=bn.get("rest_url", "https://api.binance.com/api/v3"),
+    )
+
+    # Assets
+    for name, params in raw.get("assets", {}).items():
+        config.assets[name] = AssetConfig(
+            enabled=params.get("enabled", True),
+            symbol=params.get("symbol", ""),
+            default_sigma=params.get("default_sigma", 0.60),
+            gamma=params.get("gamma", 0.30),
+            gamma_near_expiry=params.get("gamma_near_expiry", 1.0),
+            min_spread=params.get("min_spread", 0.04),
+            max_spread=params.get("max_spread", 0.25),
+            max_order_size=params.get("max_order_size", 30),
+            max_dollar_delta=params.get("max_dollar_delta", 50.0),
+            soft_limit=params.get("soft_limit", 25.0),
+            hard_limit=params.get("hard_limit", 40.0),
+            emergency=params.get("emergency", 48.0),
+        )
+
+    # Global
+    g = raw.get("global", {})
+    config.global_params = GlobalConfig(
+        refresh_interval=g.get("refresh_interval", 1),
+        stop_quoting_seconds=g.get("stop_quoting_seconds", 120),
+        reduce_size_seconds=g.get("reduce_size_seconds", 300),
+        reprice_threshold=g.get("reprice_threshold", 0.005),
+        max_daily_loss_pct=g.get("max_daily_loss_pct", 0.05),
+        max_drawdown_pct=g.get("max_drawdown_pct", 0.03),
+        max_capital_per_market=g.get("max_capital_per_market", 200.0),
+        total_capital=g.get("total_capital", 200.0),
+        market_discovery_interval=g.get("market_discovery_interval", 30),
+        vol_lookback_seconds=g.get("vol_lookback_seconds", 300),
+        kappa_window_seconds=g.get("kappa_window_seconds", 300),
+    )
+
+    # Regime
+    r = raw.get("regime", {})
+    config.regime = RegimeConfig(
+        lookback=r.get("lookback", 20),
+        trend_threshold=r.get("trend_threshold", 0.015),
+        spike_threshold=r.get("spike_threshold", 0.03),
+    )
+
+    # Toxicity
+    t = raw.get("toxicity", {})
+    config.toxicity = ToxicityConfig(
+        window_seconds=t.get("window_seconds", 300),
+        threshold=t.get("threshold", 0.002),
+        edge_adverse_rate=t.get("edge_adverse_rate", 0.60),
+        edge_window=t.get("edge_window", 30),
+    )
+
+    # Dry run
+    d = raw.get("dry_run", {})
+    config.dry_run = DryRunConfig(
+        fill_probability=d.get("fill_probability", 0.60),
+        fill_delay_min=d.get("fill_delay_min", 2),
+        fill_delay_max=d.get("fill_delay_max", 10),
+        toxicity_multiplier=d.get("toxicity_multiplier", 2.0),
+    )
+
+    return config
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge two dicts. Override values take precedence."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result

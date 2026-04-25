@@ -1,0 +1,123 @@
+# ============================================================
+# Polymarket Market-Maker Bot — Default Configuration
+# 15-Minute Binary Crypto Markets (Up/Down)
+#
+# STRATEGY: Buy-only, post_only=True, earn maker rebates.
+# Profit comes from REBATES not trading edge.
+# Keep combined cost near $0.95 for maximum fill rate.
+# ============================================================
+
+mode: "dry-run"   # "dry-run" or "live"
+
+# --- Credentials (override in live.yaml or env vars) ---
+credentials:
+  polymarket:
+    private_key: "${POLYMARKET_PK}"
+    api_key: "${CLOB_API_KEY}"
+    api_secret: "${CLOB_SECRET}"
+    api_passphrase: "${CLOB_PASS_PHRASE}"
+    chain_id: 137
+    host: "https://clob.polymarket.com"
+
+  binance:
+    ws_url: "wss://stream.binance.com:9443/ws"
+    rest_url: "https://api.binance.com/api/v3"
+
+# --- Per-Asset Parameters ---
+assets:
+  BTC:
+    enabled: true
+    symbol: "BTCUSDT"
+    default_sigma: 0.60
+    gamma: 0.40             # Increased from 0.15: much more aggressive skew
+    gamma_near_expiry: 0.80
+    min_spread: 0.01    # 0.5 ticks ($0.005) per side to get 0.99 combined cost
+    max_spread: 0.05           # 5 ticks max near expiry
+    max_order_size: 15         # Reduced from 30 to build inventory slower
+    max_dollar_delta: 150
+    soft_limit: 75
+    hard_limit: 120
+    emergency: 140
+
+  ETH:
+    enabled: true
+    symbol: "ETHUSDT"
+    default_sigma: 0.70
+    gamma: 0.15
+    gamma_near_expiry: 0.50
+    min_spread: 0.01
+    max_spread: 0.05
+    max_order_size: 30
+    max_dollar_delta: 150
+    soft_limit: 75
+    hard_limit: 120
+    emergency: 140
+
+  SOL:
+    enabled: true
+    symbol: "SOLUSDT"
+    default_sigma: 0.90
+    gamma: 0.20
+    gamma_near_expiry: 0.60
+    min_spread: 0.01
+    max_spread: 0.05
+    max_order_size: 20
+    max_dollar_delta: 100
+    soft_limit: 50
+    hard_limit: 80
+    emergency: 95
+
+  XRP:
+    enabled: true
+    symbol: "XRPUSDT"
+    default_sigma: 0.80
+    gamma: 0.20
+    gamma_near_expiry: 0.60
+    min_spread: 0.01
+    max_spread: 0.05
+    max_order_size: 25
+    max_dollar_delta: 100
+    soft_limit: 50
+    hard_limit: 80
+    emergency: 95
+
+# --- Global Trading Parameters ---
+global:
+  refresh_interval: 0.25
+  stop_quoting_seconds: 90     # Quote closer to expiry (more volume)
+  reduce_size_seconds: 240
+  reprice_threshold: 0.005
+  max_daily_loss_pct: 0.50     # 50% — generous, rebates offset losses
+  max_drawdown_pct: 0.30       # 30% drawdown pause (auto-resumes 60s)
+  max_capital_per_market: 500    # Higher with tight spreads (more pairs)
+  total_capital: 500
+  market_discovery_interval: 30
+  vol_lookback_seconds: 300
+  kappa_window_seconds: 300
+
+# --- Regime Filter ---
+regime:
+  lookback: 30
+  trend_threshold: 0.08        # Only react to big moves
+  spike_threshold: 0.15
+
+# --- Toxicity ---
+toxicity:
+  window_seconds: 300
+  threshold: 0.002
+  edge_adverse_rate: 0.60
+  edge_window: 30
+
+# --- Dry Run ---
+dry_run:
+  fill_probability: 0.60
+  fill_delay_min: 2
+  fill_delay_max: 10
+  toxicity_multiplier: 2.0
+
+# --- Logging ---
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  console: true
+  json: true
