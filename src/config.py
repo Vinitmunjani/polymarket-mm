@@ -40,6 +40,7 @@ class GlobalConfig:
     max_drawdown_pct: float = 0.03
     max_capital_per_market: float = 200.0
     total_capital: float = 200.0
+    starting_capital: float = 500.0
     market_discovery_interval: int = 30
     vol_lookback_seconds: int = 300
     kappa_window_seconds: int = 300
@@ -216,6 +217,7 @@ def load_config(config_path: str = "config/default.yaml",
         max_drawdown_pct=g.get("max_drawdown_pct", 0.03),
         max_capital_per_market=g.get("max_capital_per_market", 200.0),
         total_capital=g.get("total_capital", 200.0),
+        starting_capital=g.get("starting_capital", 500.0),
         market_discovery_interval=g.get("market_discovery_interval", 30),
         vol_lookback_seconds=g.get("vol_lookback_seconds", 300),
         kappa_window_seconds=g.get("kappa_window_seconds", 300),

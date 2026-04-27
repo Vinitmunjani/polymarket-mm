@@ -96,6 +96,8 @@ class PnLSnapshot:
     total_shares: float = 0.0        # Total shares traded
     avg_rebate_per_fill: float = 0.0
     rebate_rate_bps: float = 0.0     # Effective rebate rate in bps
+    starting_capital: float = 0.0
+    current_capital: float = 0.0
 
 
 class PnLTracker:
@@ -127,9 +129,15 @@ class PnLTracker:
         self._asset_fills: dict[str, int] = {}
         self._asset_volume: dict[str, float] = {}
 
-        # Fill history
         self._fills: list[FillRecord] = []
         self._session_start = time.time()
+        
+        # Capital tracking
+        self.starting_capital = 500.0  # Will be set in main
+        self.current_capital = 500.0
+
+    def record_capital_recovery(self, amount: float):
+        self.current_capital += amount
 
     def record_fill(self, size: float, price: float,
                     side: str = "", asset: str = "",
@@ -148,6 +156,7 @@ class PnLTracker:
         notional = size * price
         self.total_volume += notional
         self.total_shares += size
+        self.current_capital -= notional
 
         # Compute rebate
         taker_fee = compute_taker_fee(size, price, self.fee_rate)
@@ -227,6 +236,8 @@ class PnLTracker:
             total_shares=self.total_shares,
             avg_rebate_per_fill=avg_rebate,
             rebate_rate_bps=rebate_bps,
+            starting_capital=self.starting_capital,
+            current_capital=self.current_capital,
         )
         return snap
 

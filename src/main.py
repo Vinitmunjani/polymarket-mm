@@ -26,7 +26,7 @@ from src.strategy.inventory import InventoryManager
 from src.execution.order_manager import OrderManager
 from src.execution.dry_run import DryRunExecutor
 from src.execution.ctf_ops import (
-    CTFOperations, GaslessMerger, BalanceMonitor,
+    CTFOperations, GaslessMerger, BalanceMonitor, SimulatedBalanceMonitor
 )
 from src.risk.risk_engine import RiskEngine
 from src.orchestration.market_cycler import MarketCycler
@@ -108,6 +108,8 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None):
 
     # P&L tracker
     pnl_tracker = PnLTracker()
+    pnl_tracker.starting_capital = config.global_params.starting_capital
+    pnl_tracker.current_capital = config.global_params.starting_capital
 
     # Dashboard
     dashboard = Dashboard(mode=mode)
@@ -123,6 +125,15 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None):
             max_queue_time=config.dry_run.fill_delay_max,
         )
         log.info("dry_run_executor_initialized", fill_model="price_crossing")
+        
+        if config.balance_monitor.enabled:
+            balance_monitor = SimulatedBalanceMonitor(
+                warn_balance=config.balance_monitor.warn_balance,
+                merge_balance=config.balance_monitor.merge_balance,
+                min_merge_pairs=config.balance_monitor.min_merge_pairs,
+                check_interval=config.balance_monitor.check_interval,
+            )
+            log.info("simulated_balance_monitor_ready")
     else:
         # Live mode
         from src.execution.clob_client import ClobClientWrapper

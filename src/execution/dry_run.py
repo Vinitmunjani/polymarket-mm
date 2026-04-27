@@ -172,15 +172,15 @@ class DryRunExecutor:
                 edge = fv - order.price
                 if edge <= 0:
                     should_fill = True  # Price crossed
-                elif edge < taker_tolerance and random.random() < 0.2:
-                    should_fill = True  # Taker crossed our spread
+                elif edge < 0.15 and random.random() < 0.4:
+                    should_fill = True  # Simulate market order hitting our shadowed quote
             elif order.side == "no":
                 no_value = 1.0 - fv
                 edge = no_value - order.price
                 if edge <= 0:
                     should_fill = True  # Price crossed
-                elif edge < taker_tolerance and random.random() < 0.2:
-                    should_fill = True  # Taker crossed our spread
+                elif edge < 0.15 and random.random() < 0.4:
+                    should_fill = True  # Simulate market order hitting our shadowed quote
 
             if not should_fill:
                 continue

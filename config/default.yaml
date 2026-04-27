@@ -41,7 +41,7 @@ assets:
     gamma_near_expiry: 0.80
     min_spread: 0.01    # 0.5 ticks ($0.005) per side to get 0.99 combined cost
     max_spread: 0.05           # 5 ticks max near expiry
-    max_order_size: 15         # Reduced from 30 to build inventory slower
+    max_order_size: 10         # Reduced from 30 to build inventory slower
     max_dollar_delta: 150
     soft_limit: 75
     hard_limit: 120
@@ -94,11 +94,12 @@ global:
   refresh_interval: 0.25
   stop_quoting_seconds: 90     # Quote closer to expiry (more volume)
   reduce_size_seconds: 240
-  reprice_threshold: 0.005
+  reprice_threshold: 0.01      # Increased to 1 cent to protect queue position
+  starting_capital: 50
   max_daily_loss_pct: 0.50     # 50% — generous, rebates offset losses
   max_drawdown_pct: 0.30       # 30% drawdown pause (auto-resumes 60s)
   max_capital_per_market: 500    # Higher with tight spreads (more pairs)
-  total_capital: 500
+  total_capital: 50
   market_discovery_interval: 30
   vol_lookback_seconds: 300
   kappa_window_seconds: 300
@@ -131,7 +132,7 @@ balance_monitor:
   warn_balance: 20.0       # Log warning when USDC below this
   merge_balance: 10.0      # Trigger auto-merge when USDC below this
   min_merge_pairs: 5       # Minimum matched pairs worth merging
-  check_interval: 30.0     # Seconds between balance checks
+  check_interval: 5.0     # Seconds between balance checks
 
 # --- Logging ---
 logging:

@@ -150,7 +150,7 @@ class Dashboard:
         table.add_row("Regime", s.get("regime", "STABLE"),
                        "", "")
 
-        # Wallet balance (live mode only)
+        # Wallet balance (live mode only or simulated)
         wallet_bal = s.get("wallet_balance", -1)
         if wallet_bal >= 0:
             warn = s.get("balance_warn_threshold", 20)
@@ -163,6 +163,19 @@ class Dashboard:
             table.add_row("Wallet USDC", f"[{bc}]${wallet_bal:.2f}[/]",
                            "Auto-Merges",
                            f"{auto_merges} (${merged_usdc:.2f})" if auto_merges else "0")
+
+        # Simulated Capital Tracking (if starting_capital is present)
+        start_cap = s.get("starting_capital", 0)
+        curr_cap = s.get("current_capital", 0)
+        if start_cap > 0:
+            cc_color = "green" if curr_cap >= start_cap else "red"
+            table.add_row("Starting Capital", f"${start_cap:.2f}",
+                           "Current Capital", f"[{cc_color}]${curr_cap:.2f}[/]")
+                           
+        # Merge Message
+        merge_msg = s.get("merge_message", "")
+        if merge_msg:
+            table.add_row("Auto-Merge Event", f"[yellow bold]{merge_msg}[/]", "", "")
 
         return table
 

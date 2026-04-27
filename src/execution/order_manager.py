@@ -35,7 +35,7 @@ class OrderManager:
     Enforces BUY-only + post_only at this level.
     """
 
-    def __init__(self, executor, reprice_threshold: float = 0.005):
+    def __init__(self, executor, reprice_threshold: float = 0.01):
         """
         Args:
             executor: Either ClobClientWrapper (live) or DryRunExecutor (dry-run).
@@ -172,8 +172,9 @@ class OrderManager:
         if abs(new_price - existing_price) > self.reprice_threshold:
             return True
 
-        # Reprice if size changed significantly (>30%)
-        if existing_size > 0 and abs(new_size - existing_size) / existing_size > 0.3:
+        # To preserve queue position, DO NOT reprice if size merely decreases.
+        # Only reprice if we need significantly MORE size (>50% increase)
+        if existing_size > 0 and new_size > existing_size * 1.5:
             return True
 
         return False

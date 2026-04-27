@@ -709,6 +709,8 @@ class MarketCycler:
             "total_shares": self.pnl.total_shares,
             "markets_settled": self.pnl.markets_settled,
             "total_fills": self.pnl.total_fills,
+            "starting_capital": getattr(self.pnl, "starting_capital", 0),
+            "current_capital": getattr(self.pnl, "current_capital", 0),
         }
 
         # Add balance monitor stats (live mode only)
@@ -719,6 +721,7 @@ class MarketCycler:
             state["auto_merged_usdc"] = bm_stats["total_merged_usdc"]
             state["balance_warn_threshold"] = self.balance_monitor.warn_balance
             state["balance_merge_threshold"] = self.balance_monitor.merge_balance
+            state["merge_message"] = bm_stats.get("merge_message", "")
 
         self._dashboard_cb(state)
 

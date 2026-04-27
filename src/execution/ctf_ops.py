@@ -799,6 +799,91 @@ class CTFOperations:
             log.error("split_error", error=str(e))
             return None
 
+class SimulatedBalanceMonitor:
+    """Simulated Balance Monitor for Dry-Run Mode. Uses current_capital from PnLTracker."""
+    def __init__(self, warn_balance: float = 20.0, merge_balance: float = 10.0,
+                 min_merge_pairs: int = 5, check_interval: float = 30.0):
+        self.warn_balance = warn_balance
+        self.merge_balance = merge_balance
+        self.min_merge_pairs = min_merge_pairs
+        self.check_interval = check_interval
+        self._last_check_ts = 0.0
+        self._total_merged_usdc = 0.0
+        self._total_merges = 0
+        self._last_balance = 0.0
+        self._merge_message = ""
+        
+    async def initialize(self) -> bool:
+        return True
+        
+    async def check_and_merge(self, inventory_mgr, gasless_merger=None, ctf_ops=None, pnl_tracker=None) -> dict:
+        result = { "checked": False, "balance": 0.0, "merged": False, "pairs_merged": 0, "usdc_recovered": 0.0 }
+        if not pnl_tracker: return result
+        
+        import time
+        now = time.time()
+        if now - self._last_check_ts < self.check_interval: return result
+        self._last_check_ts = now
+        
+        balance = pnl_tracker.current_capital
+        self._last_balance = balance
+        result["checked"] = True
+        result["balance"] = balance
+        
+        if balance >= self.merge_balance: return result
+        
+        total_pairs = 0
+        total_usdc = 0.0
+        
+        for market_id, pos in inventory_mgr.positions.items():
+            pairs = int(pos.matched_pairs())
+            if pairs < self.min_merge_pairs: continue
+            
+            usdc_recovery = pairs * 1.0
+            pair_profit = pos.matched_pair_profit()
+            
+            total_pairs += pairs
+            total_usdc += usdc_recovery
+            
+            if pnl_tracker and pair_profit > 0:
+                pnl_tracker.record_settlement(pair_profit, market_id)
+            if pnl_tracker:
+                pnl_tracker.record_capital_recovery(usdc_recovery)
+                
+            avg_yes = pos.yes_avg_entry
+            avg_no = pos.no_avg_entry
+            pos.yes_shares -= pairs
+            pos.no_shares -= pairs
+            pos.yes_total_cost -= pairs * avg_yes
+            pos.no_total_cost -= pairs * avg_no
+            pos.yes_shares = max(0, pos.yes_shares)
+            pos.no_shares = max(0, pos.no_shares)
+            pos.yes_total_cost = max(0, pos.yes_total_cost)
+            pos.no_total_cost = max(0, pos.no_total_cost)
+            
+            self._total_merged_usdc += usdc_recovery
+            self._total_merges += 1
+            
+        result["merged"] = total_pairs > 0
+        result["pairs_merged"] = total_pairs
+        result["usdc_recovered"] = total_usdc
+        
+        if total_pairs > 0:
+            self._merge_message = f"Merged {total_pairs} pairs | +${total_usdc:.2f}"
+            log.info("simulated_auto_merge", pairs=total_pairs, usdc=total_usdc)
+            
+        return result
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "last_balance": self._last_balance,
+            "total_merged_usdc": self._total_merged_usdc,
+            "total_merges": self._total_merges,
+            "initialized": True,
+            "merge_message": getattr(self, '_merge_message', "")
+        }
+
     async def get_token_balance(self, token_id: int) -> int:
         """Get balance of a specific outcome token."""
         if not self._initialized:
