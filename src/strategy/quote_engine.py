@@ -134,7 +134,7 @@ class QuoteEngine:
 
         # Reservation price = inventory-adjusted center
         reservation = fair_value - skew
-        reservation = max(0.02, min(0.98, reservation))
+        reservation = max(0.005, min(0.995, reservation))
         result.reservation_price = round(reservation, 4)
 
         # 2. Compute base spread (per side)
