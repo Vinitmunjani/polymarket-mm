@@ -501,7 +501,7 @@ class MarketCycler:
         phase = determine_phase(remaining, self.gc.stop_quoting_seconds,
                                 self.gc.reduce_size_seconds)
 
-        if phase == "DEAD_ZONE":
+        if phase == "DEAD_ZONE" and pos.share_imbalance() == 0:
             await self.order_mgr.cancel_market_quotes(market.market_id)
             self._update_dashboard(market, spot, fv, sigma, phase, remaining)
             return
@@ -545,6 +545,19 @@ class MarketCycler:
         up_size, down_size = self.inventory.compute_size_adjustment(
             market.market_id, fv, self.quote_engine.max_order_size
         )
+
+        # 10.5 Enforce Close-Only quoting during DEAD_ZONE
+        if phase == "DEAD_ZONE":
+            # Only allow quoting the side that reduces the imbalance
+            if imbalance > 0:
+                up_size = 0
+                down_size = min(self.quote_engine.max_order_size, int(imbalance))
+            elif imbalance < 0:
+                down_size = 0
+                up_size = min(self.quote_engine.max_order_size, int(abs(imbalance)))
+            else:
+                up_size = 0
+                down_size = 0
 
         # 11. Capital limit check
         blocks = self.inventory.check_capital_limit(market.market_id, fv)

@@ -112,7 +112,10 @@ def determine_phase(time_remaining: float, stop_seconds: int = 120,
 def apply_phase_params(phase: str, quote_engine, asset_config):
     """Adjust quote engine parameters based on current phase."""
     if phase == "DEAD_ZONE":
-        quote_engine.max_order_size = 0
+        # Allow close-only sizing, but widen spread aggressively to prevent adverse selection
+        quote_engine.max_order_size = asset_config.max_order_size
+        quote_engine.gamma = asset_config.gamma_near_expiry
+        quote_engine.min_spread = max(0.05, asset_config.max_spread)
     elif phase == "WIND_DOWN":
         quote_engine.max_order_size = max(3, int(asset_config.max_order_size * 0.15))
         quote_engine.gamma = asset_config.gamma_near_expiry
@@ -132,7 +135,10 @@ def pre_trade_checks(fair_value: float, quotes, inventory_state,
     failed = []
 
     if phase == "DEAD_ZONE":
-        failed.append("dead_zone")
+        # In DEAD_ZONE, we only allow CLOSE-ONLY orders (one side must be 0)
+        # If both sides are quoted, it's illegal in dead zone.
+        if quotes.yes_buy_size > 0 and quotes.no_buy_size > 0:
+            failed.append("dead_zone_no_two_sided")
 
     if not fair_value_fresh:
         failed.append("stale_fair_value")
