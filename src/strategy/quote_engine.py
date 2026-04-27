@@ -177,10 +177,32 @@ class QuoteEngine:
         yes_buy = max(0.01, min(0.99, yes_buy))
         no_buy = max(0.01, min(0.99, no_buy))
 
+        orig_yes = yes_buy
+        orig_no = no_buy
+
         if best_ask_yes is not None and yes_buy >= best_ask_yes:
             yes_buy = best_ask_yes - 0.01
         if best_ask_no is not None and no_buy >= best_ask_no:
             no_buy = best_ask_no - 0.01
+
+        # 6.5. Spread Re-Centering (Orderbook Shadowing)
+        # If the live orderbook clamped our bid down, it means our internal Fair Value
+        # is lagging the market. To maintain a tight spread and ensure we get filled,
+        # we shift the opposite side UP by the exact same amount we were clamped down.
+        yes_clamp_drop = orig_yes - yes_buy
+        no_clamp_drop = orig_no - no_buy
+
+        if yes_clamp_drop > 0 and no_clamp_drop <= 0:
+            no_buy += yes_clamp_drop
+            # Safety: don't cross the book while re-centering
+            if best_ask_no is not None and no_buy >= best_ask_no:
+                no_buy = best_ask_no - 0.01
+
+        elif no_clamp_drop > 0 and yes_clamp_drop <= 0:
+            yes_buy += no_clamp_drop
+            # Safety: don't cross the book while re-centering
+            if best_ask_yes is not None and yes_buy >= best_ask_yes:
+                yes_buy = best_ask_yes - 0.01
 
         yes_buy = max(0.01, yes_buy)
         no_buy = max(0.01, no_buy)
