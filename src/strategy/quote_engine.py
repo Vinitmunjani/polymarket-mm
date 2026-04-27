@@ -167,6 +167,13 @@ class QuoteEngine:
                 yes_buy += min(skew_adjustment * 0.5, TICK_SIZE)
 
         # 6. Clamp to valid range and live orderbook asks (prevent crossing book and rejection 4)
+        # If our calculated price is practically zero, we shouldn't bid at all
+        # because clamping it to 0.01 would mean paying more than we want to (0 edge).
+        if yes_buy < 0.005:
+            yes_size = 0
+        if no_buy < 0.005:
+            no_size = 0
+
         yes_buy = max(0.01, min(0.99, yes_buy))
         no_buy = max(0.01, min(0.99, no_buy))
 
