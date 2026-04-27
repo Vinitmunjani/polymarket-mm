@@ -102,7 +102,9 @@ class QuoteEngine:
     def generate_quotes(self, fair_value: float, t_normalized: float,
                         sigma: float, share_imbalance: float,
                         max_imbalance: float,
-                        yes_size: int, no_size: int) -> QuoteResult:
+                        yes_size: int, no_size: int,
+                        best_ask_yes: Optional[float] = None,
+                        best_ask_no: Optional[float] = None) -> QuoteResult:
         """
         Generate BUY quotes for Up and Down tokens.
 
@@ -164,9 +166,17 @@ class QuoteEngine:
                 no_buy -= skew_adjustment
                 yes_buy += min(skew_adjustment * 0.5, TICK_SIZE)
 
-        # 6. Clamp to valid range
+        # 6. Clamp to valid range and live orderbook asks (prevent crossing book and rejection 4)
         yes_buy = max(0.01, min(0.99, yes_buy))
         no_buy = max(0.01, min(0.99, no_buy))
+
+        if best_ask_yes is not None and yes_buy >= best_ask_yes:
+            yes_buy = best_ask_yes - 0.01
+        if best_ask_no is not None and no_buy >= best_ask_no:
+            no_buy = best_ask_no - 0.01
+
+        yes_buy = max(0.01, yes_buy)
+        no_buy = max(0.01, no_buy)
 
         # 7. CRITICAL: combined cost must be < $1.00
         # If we want a 0.99 combined cost (1 cent total spread), we can't use math.floor

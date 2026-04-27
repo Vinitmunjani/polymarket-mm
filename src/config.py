@@ -55,6 +55,13 @@ class CredentialsConfig:
     api_passphrase: str = ""
     chain_id: int = 137
     host: str = "https://clob.polymarket.com"
+    # Polymarket Builder (for gasless merge/split/redeem)
+    builder_api_key: str = ""
+    builder_secret: str = ""
+    builder_passphrase: str = ""
+    builder_relayer_url: str = "https://relayer-v2.polymarket.com"
+    # Polygon RPC (for balance monitoring and on-chain ops)
+    polygon_rpc_url: str = "https://polygon-rpc.com"
     # Binance
     binance_ws_url: str = "wss://stream.binance.com:9443/ws"
     binance_rest_url: str = "https://api.binance.com/api/v3"
@@ -78,6 +85,16 @@ class ToxicityConfig:
 
 
 @dataclass
+class BalanceMonitorConfig:
+    """Auto-merge balance monitoring parameters (live mode only)."""
+    enabled: bool = True
+    warn_balance: float = 20.0       # USDC balance to log warning
+    merge_balance: float = 10.0      # USDC balance to trigger auto-merge
+    min_merge_pairs: int = 5         # Minimum matched pairs to merge
+    check_interval: float = 30.0     # Seconds between balance checks
+
+
+@dataclass
 class DryRunConfig:
     """Dry-run simulation parameters."""
     fill_probability: float = 0.60
@@ -95,6 +112,7 @@ class BotConfig:
     global_params: GlobalConfig = field(default_factory=GlobalConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
     toxicity: ToxicityConfig = field(default_factory=ToxicityConfig)
+    balance_monitor: BalanceMonitorConfig = field(default_factory=BalanceMonitorConfig)
     dry_run: DryRunConfig = field(default_factory=DryRunConfig)
 
 
@@ -153,6 +171,7 @@ def load_config(config_path: str = "config/default.yaml",
     creds_raw = raw.get("credentials", {})
     pm = creds_raw.get("polymarket", {})
     bn = creds_raw.get("binance", {})
+    builder = creds_raw.get("builder", {})
     config.credentials = CredentialsConfig(
         private_key=pm.get("private_key", ""),
         api_key=pm.get("api_key", ""),
@@ -160,6 +179,11 @@ def load_config(config_path: str = "config/default.yaml",
         api_passphrase=pm.get("api_passphrase", ""),
         chain_id=pm.get("chain_id", 137),
         host=pm.get("host", "https://clob.polymarket.com"),
+        builder_api_key=builder.get("api_key", ""),
+        builder_secret=builder.get("secret", ""),
+        builder_passphrase=builder.get("passphrase", ""),
+        builder_relayer_url=builder.get("relayer_url", "https://relayer-v2.polymarket.com"),
+        polygon_rpc_url=pm.get("polygon_rpc_url", "https://polygon-rpc.com"),
         binance_ws_url=bn.get("ws_url", "wss://stream.binance.com:9443/ws"),
         binance_rest_url=bn.get("rest_url", "https://api.binance.com/api/v3"),
     )
@@ -212,6 +236,16 @@ def load_config(config_path: str = "config/default.yaml",
         threshold=t.get("threshold", 0.002),
         edge_adverse_rate=t.get("edge_adverse_rate", 0.60),
         edge_window=t.get("edge_window", 30),
+    )
+
+    # Balance monitor
+    bm = raw.get("balance_monitor", {})
+    config.balance_monitor = BalanceMonitorConfig(
+        enabled=bm.get("enabled", True),
+        warn_balance=bm.get("warn_balance", 20.0),
+        merge_balance=bm.get("merge_balance", 10.0),
+        min_merge_pairs=bm.get("min_merge_pairs", 5),
+        check_interval=bm.get("check_interval", 30.0),
     )
 
     # Dry run

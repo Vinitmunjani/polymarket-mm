@@ -18,7 +18,9 @@ from src.strategy.volatility import VolatilityEstimator
 from src.strategy.quote_engine import QuoteEngine
 from src.strategy.inventory import InventoryManager
 from src.execution.order_manager import OrderManager
-from src.execution.ctf_ops import CTFOperations
+from src.execution.ctf_ops import (
+    CTFOperations, GaslessMerger, BalanceMonitor,
+)
 from src.risk.regime_filter import RegimeFilter
 from src.risk.toxicity import FillEdgeTracker, ToxicityMonitor
 from src.risk.risk_engine import (RiskEngine, determine_phase,
@@ -127,7 +129,9 @@ class MarketCycler:
                  risk_engine: RiskEngine,
                  pnl_tracker: PnLTracker,
                  dashboard_callback=None,
-                 ctf_ops: Optional[CTFOperations] = None):
+                 ctf_ops: Optional[CTFOperations] = None,
+                 gasless_merger: Optional[GaslessMerger] = None,
+                 balance_monitor: Optional[BalanceMonitor] = None):
 
         self.asset = asset
         self.ac = asset_config
@@ -141,6 +145,8 @@ class MarketCycler:
         self.pnl = pnl_tracker
         self._dashboard_cb = dashboard_callback
         self.ctf: Optional[CTFOperations] = ctf_ops
+        self.gasless_merger: Optional[GaslessMerger] = gasless_merger
+        self.balance_monitor: Optional[BalanceMonitor] = balance_monitor
         
         # Merge threshold: auto-merge when matched pairs exceed this
         self._merge_threshold = 50  # shares
@@ -238,19 +244,32 @@ class MarketCycler:
                      matched_pairs=pairs)
 
             # --- CTF Operations ---
-            if self.ctf and pairs > 0:
-                # Merge matched pairs → get USDC back
+            if pairs > 0:
+                # Use gasless merger if available, else on-chain
                 condition_id = getattr(market, 'condition_id', None)
                 if condition_id:
                     amount = int(pairs * 1e6)  # Convert to USDC base units
-                    tx = await self.ctf.merge_positions(condition_id, amount)
+                    tx = None
+
+                    # Prefer gasless merge
+                    if self.gasless_merger and self.gasless_merger.is_available:
+                        tx = await self.gasless_merger.merge_positions(
+                            condition_id, amount
+                        )
+
+                    # Fallback to on-chain
+                    if not tx and self.ctf:
+                        tx = await self.ctf.merge_positions(
+                            condition_id, amount
+                        )
+
                     if tx:
                         pair_profit = pos.matched_pair_profit()
                         self.pnl.record_settlement(pair_profit, market.market_id)
                         log.info("pairs_merged",
                                  pairs=pairs,
                                  profit=f"${pair_profit:.4f}",
-                                 tx=tx[:16] if tx else "none")
+                                 tx=str(tx)[:16] if tx else "none")
 
             # Try to redeem any remaining tokens (if market resolved)
             if self.ctf:
@@ -534,6 +553,14 @@ class MarketCycler:
         if blocks.get("block_no"):
             down_size = 0
 
+        # 11.5 Fetch live orderbook to prevent crossing the book
+        book_up = await self.book_reader.get_book(market.token_id_up)
+        best_ask_yes = None
+        best_ask_no = None
+        if book_up:
+            best_ask_yes = book_up.best_ask
+            best_ask_no = 1.0 - book_up.best_bid
+
         # 12. Generate quotes using share imbalance for price skewing
         #     yes_buy = Up buy price, no_buy = Down buy price
         quotes = self.quote_engine.generate_quotes(
@@ -544,6 +571,8 @@ class MarketCycler:
             max_imbalance=self.ac.max_dollar_delta,  # reuse config threshold
             yes_size=up_size,
             no_size=down_size,
+            best_ask_yes=best_ask_yes,
+            best_ask_no=best_ask_no,
         )
         quotes.phase = phase
 
@@ -586,6 +615,20 @@ class MarketCycler:
                 self.edge_tracker.record_fill(
                     fill["side"], fill["price"], fv
                 )
+
+        # 15.5. Auto-merge check (live mode: reclaim USDC when balance is low)
+        if self.balance_monitor:
+            merge_result = await self.balance_monitor.check_and_merge(
+                inventory_mgr=self.inventory,
+                gasless_merger=self.gasless_merger,
+                ctf_ops=self.ctf,
+                pnl_tracker=self.pnl,
+            )
+            if merge_result.get("merged"):
+                log.info("auto_merge_during_trading",
+                         asset=self.asset,
+                         pairs=merge_result["pairs_merged"],
+                         usdc=f"${merge_result['usdc_recovered']:.2f}")
 
         # 16. Update dashboard
         self._update_dashboard(market, spot, fv, sigma, phase, remaining,
@@ -652,6 +695,16 @@ class MarketCycler:
             "markets_settled": self.pnl.markets_settled,
             "total_fills": self.pnl.total_fills,
         }
+
+        # Add balance monitor stats (live mode only)
+        if self.balance_monitor:
+            bm_stats = self.balance_monitor.stats
+            state["wallet_balance"] = bm_stats["last_balance"]
+            state["auto_merges"] = bm_stats["total_merges"]
+            state["auto_merged_usdc"] = bm_stats["total_merged_usdc"]
+            state["balance_warn_threshold"] = self.balance_monitor.warn_balance
+            state["balance_merge_threshold"] = self.balance_monitor.merge_balance
+
         self._dashboard_cb(state)
 
     async def stop(self):

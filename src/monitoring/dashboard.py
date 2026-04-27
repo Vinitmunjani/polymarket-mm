@@ -19,9 +19,17 @@ class Dashboard:
         self._global_state = {}
 
     def update(self, state: dict):
-        """Update state for a specific asset."""
+        """Update state for a specific asset.
+        
+        Uses dict.update() (merge) instead of replacement so that
+        real-time fields written in-place by on_live_price (spot_price,
+        fair_value) are not discarded between quote cycles.
+        """
         asset = state.get("asset", "?")
-        self._states[asset] = state
+        if asset not in self._states:
+            self._states[asset] = state
+        else:
+            self._states[asset].update(state)
         self._global_state.update(state)
 
     def render(self) -> Table:
@@ -141,6 +149,20 @@ class Dashboard:
 
         table.add_row("Regime", s.get("regime", "STABLE"),
                        "", "")
+
+        # Wallet balance (live mode only)
+        wallet_bal = s.get("wallet_balance", -1)
+        if wallet_bal >= 0:
+            warn = s.get("balance_warn_threshold", 20)
+            merge = s.get("balance_merge_threshold", 10)
+            bc = "green" if wallet_bal > warn else (
+                "yellow" if wallet_bal > merge else "red"
+            )
+            auto_merges = s.get("auto_merges", 0)
+            merged_usdc = s.get("auto_merged_usdc", 0)
+            table.add_row("Wallet USDC", f"[{bc}]${wallet_bal:.2f}[/]",
+                           "Auto-Merges",
+                           f"{auto_merges} (${merged_usdc:.2f})" if auto_merges else "0")
 
         return table
 

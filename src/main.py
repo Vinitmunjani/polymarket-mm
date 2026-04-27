@@ -25,6 +25,9 @@ from src.data.orderbook import OrderBookReader
 from src.strategy.inventory import InventoryManager
 from src.execution.order_manager import OrderManager
 from src.execution.dry_run import DryRunExecutor
+from src.execution.ctf_ops import (
+    CTFOperations, GaslessMerger, BalanceMonitor,
+)
 from src.risk.risk_engine import RiskEngine
 from src.orchestration.market_cycler import MarketCycler
 
@@ -110,6 +113,10 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None):
     dashboard = Dashboard(mode=mode)
 
     # --- Initialize executor (mode-dependent) ---
+    gasless_merger = None
+    balance_monitor = None
+    ctf_ops = None
+
     if mode == "dry-run":
         executor = DryRunExecutor(
             min_queue_time=config.dry_run.fill_delay_min,
@@ -129,6 +136,52 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None):
         )
         await executor.initialize()
         log.info("live_executor_initialized")
+
+        # --- Initialize gasless merger (Builder Relayer) ---
+        gasless_merger = GaslessMerger(
+            private_key=config.credentials.private_key,
+            builder_api_key=config.credentials.builder_api_key,
+            builder_secret=config.credentials.builder_secret,
+            builder_passphrase=config.credentials.builder_passphrase,
+            relayer_url=config.credentials.builder_relayer_url,
+            chain_id=config.credentials.chain_id,
+        )
+        gasless_ok = await gasless_merger.initialize()
+        if gasless_ok:
+            log.info("gasless_merger_ready",
+                     msg="Will use gasless relayer for merge operations")
+        else:
+            log.warning("gasless_merger_unavailable",
+                        msg="Will fall back to on-chain merge (requires POL for gas)")
+
+        # --- Initialize on-chain CTF ops (fallback for merge) ---
+        ctf_ops = CTFOperations(
+            private_key=config.credentials.private_key,
+            rpc_url=config.credentials.polygon_rpc_url,
+            dry_run=False,
+        )
+        await ctf_ops.initialize()
+
+        # --- Initialize balance monitor (auto-merge on low USDC) ---
+        if config.balance_monitor.enabled:
+            balance_monitor = BalanceMonitor(
+                private_key=config.credentials.private_key,
+                rpc_url=config.credentials.polygon_rpc_url,
+                warn_balance=config.balance_monitor.warn_balance,
+                merge_balance=config.balance_monitor.merge_balance,
+                min_merge_pairs=config.balance_monitor.min_merge_pairs,
+                check_interval=config.balance_monitor.check_interval,
+            )
+            bal_ok = await balance_monitor.initialize()
+            if bal_ok:
+                initial_bal = await balance_monitor.get_usdc_balance()
+                log.info("balance_monitor_ready",
+                         balance=f"${initial_bal:.2f}",
+                         merge_at=f"${config.balance_monitor.merge_balance:.2f}")
+            else:
+                log.warning("balance_monitor_failed",
+                            msg="Balance monitoring disabled")
+                balance_monitor = None
 
     # Order manager
     order_manager = OrderManager(
@@ -172,6 +225,9 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None):
             risk_engine=risk,
             pnl_tracker=pnl_tracker,
             dashboard_callback=dashboard_update,
+            ctf_ops=ctf_ops,
+            gasless_merger=gasless_merger,
+            balance_monitor=balance_monitor,
         )
         cyclers.append(cycler)
 

@@ -107,6 +107,453 @@ BINARY_PARTITION = [1, 2]
 PARENT_COLLECTION_ID = b'\x00' * 32
 
 
+class GaslessMerger:
+    """
+    Gasless merge/split via Polymarket's Builder Relayer Client.
+    
+    Uses the Polymarket relayer infrastructure to execute CTF operations
+    (merge, split, redeem) without paying gas. Requires Builder Program
+    credentials obtained from polymarket.com/settings?tab=builder.
+    
+    This is the PREFERRED method for live trading because:
+      - Zero gas cost (relayer pays)
+      - Faster execution (relayer has priority)
+      - Same security (signed by your key)
+    """
+
+    # ABI fragments for encoding merge calls
+    CTF_MERGE_ABI = [
+        {
+            "name": "mergePositions",
+            "type": "function",
+            "inputs": [
+                {"name": "collateralToken", "type": "address"},
+                {"name": "parentCollectionId", "type": "bytes32"},
+                {"name": "conditionId", "type": "bytes32"},
+                {"name": "partition", "type": "uint256[]"},
+                {"name": "amount", "type": "uint256"},
+            ],
+            "outputs": [],
+        }
+    ]
+    NEG_RISK_MERGE_ABI = [
+        {
+            "name": "mergePositions",
+            "type": "function",
+            "inputs": [
+                {"name": "_conditionId", "type": "bytes32"},
+                {"name": "_amount", "type": "uint256"},
+            ],
+            "outputs": [],
+        }
+    ]
+    # Neg Risk Adapter address on Polygon
+    NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+
+    def __init__(self, private_key: str,
+                 builder_api_key: str = "",
+                 builder_secret: str = "",
+                 builder_passphrase: str = "",
+                 relayer_url: str = "https://relayer-v2.polymarket.com",
+                 chain_id: int = 137):
+        self._private_key = private_key
+        self._builder_api_key = builder_api_key
+        self._builder_secret = builder_secret
+        self._builder_passphrase = builder_passphrase
+        self._relayer_url = relayer_url
+        self._chain_id = chain_id
+        self._client = None
+        self._w3 = None
+        self._initialized = False
+
+    async def initialize(self) -> bool:
+        """Initialize the gasless relayer client."""
+        if not all([self._builder_api_key, self._builder_secret,
+                    self._builder_passphrase]):
+            log.warning("gasless_no_builder_creds",
+                        msg="Builder credentials not configured. "
+                            "Gasless merge unavailable.")
+            return False
+
+        try:
+            from web3 import Web3
+            self._w3 = Web3()  # Only for ABI encoding, no RPC needed
+
+            from py_builder_relayer_client.client import RelayClient
+            from py_builder_signing_sdk import (
+                BuilderConfig, BuilderApiKeyCreds,
+            )
+
+            builder_config = BuilderConfig(
+                local_builder_creds=BuilderApiKeyCreds(
+                    key=self._builder_api_key,
+                    secret=self._builder_secret,
+                    passphrase=self._builder_passphrase,
+                )
+            )
+            self._client = RelayClient(
+                self._relayer_url,
+                self._chain_id,
+                self._private_key,
+                builder_config,
+            )
+            self._initialized = True
+            log.info("gasless_merger_initialized",
+                     relayer=self._relayer_url)
+            return True
+
+        except ImportError as e:
+            log.warning("gasless_deps_missing",
+                        msg="Install: pip install py-builder-relayer-client "
+                            "py-builder-signing-sdk",
+                        error=str(e))
+            return False
+        except Exception as e:
+            log.error("gasless_init_error", error=str(e))
+            return False
+
+    async def merge_positions(self, condition_id: str, amount: int,
+                               is_neg_risk: bool = False) -> Optional[str]:
+        """
+        Merge matched pairs via gasless relayer.
+        
+        1 Up + 1 Down → $1 USDC (zero gas cost).
+        
+        Args:
+            condition_id: Market condition ID (hex string).
+            amount: Number of pairs in token units (1 share = 10^6).
+            is_neg_risk: Whether this is a neg-risk market.
+            
+        Returns:
+            Transaction hash if successful, None otherwise.
+        """
+        if not self._initialized:
+            log.error("gasless_not_initialized")
+            return None
+
+        try:
+            condition_bytes = bytes.fromhex(
+                condition_id.replace("0x", "")
+            )
+
+            if is_neg_risk:
+                # Neg-risk markets use the NegRiskAdapter
+                contract = self._w3.eth.contract(
+                    address=self._w3.to_checksum_address(
+                        self.NEG_RISK_ADAPTER
+                    ),
+                    abi=self.NEG_RISK_MERGE_ABI,
+                )
+                data = contract.encode_abi(
+                    "mergePositions",
+                    args=[condition_bytes, amount],
+                )
+                target = self.NEG_RISK_ADAPTER
+            else:
+                # Standard binary markets use ConditionalTokens
+                contract = self._w3.eth.contract(
+                    address=self._w3.to_checksum_address(CTF_CONTRACT),
+                    abi=self.CTF_MERGE_ABI,
+                )
+                parent = bytes(32)  # Zero bytes32
+                data = contract.encode_abi(
+                    "mergePositions",
+                    args=[
+                        self._w3.to_checksum_address(USDC_ADDRESS),
+                        parent,
+                        condition_bytes,
+                        [1, 2],  # Binary partition
+                        amount,
+                    ],
+                )
+                target = CTF_CONTRACT
+
+            # Execute via relayer (gasless)
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._client.execute(
+                    [{"to": target, "data": data, "value": "0"}],
+                    "Merge Positions",
+                ),
+            )
+
+            tx_hash = (response if isinstance(response, str)
+                       else str(response))
+            log.info("gasless_merge_success",
+                     condition=condition_id[:12],
+                     pairs=amount // 10**6,
+                     usdc_back=f"${amount / 1e6:.2f}",
+                     tx=tx_hash[:16] if tx_hash else "submitted")
+            return tx_hash
+
+        except Exception as e:
+            log.error("gasless_merge_error",
+                      condition=condition_id[:12],
+                      error=str(e))
+            return None
+
+    @property
+    def is_available(self) -> bool:
+        return self._initialized
+
+
+class BalanceMonitor:
+    """
+    Monitors USDC wallet balance and auto-triggers merge of matched
+    pairs when the balance drops below a configurable threshold.
+    
+    This prevents the bot from running out of capital to place new
+    orders in live trading. When balance is low:
+      1. Identifies all markets with mergeable matched pairs
+      2. Merges via gasless relayer (preferred) or on-chain tx (fallback)
+      3. Recovered USDC is immediately available for new orders
+    
+    Thresholds:
+      - warn_balance:  Log a warning (e.g., $20)
+      - merge_balance: Trigger auto-merge (e.g., $10)
+      - min_merge_pairs: Don't merge fewer than N pairs (avoid dust)
+    """
+
+    def __init__(self,
+                 private_key: str,
+                 rpc_url: str = "https://polygon-rpc.com",
+                 warn_balance: float = 20.0,
+                 merge_balance: float = 10.0,
+                 min_merge_pairs: int = 5,
+                 check_interval: float = 30.0):
+        """
+        Args:
+            private_key: Wallet private key.
+            rpc_url: Polygon RPC for balance checks.
+            warn_balance: USDC balance to trigger warning.
+            merge_balance: USDC balance to trigger auto-merge.
+            min_merge_pairs: Minimum matched pairs to trigger merge.
+            check_interval: Seconds between balance checks.
+        """
+        self._private_key = private_key
+        self._rpc_url = rpc_url
+        self.warn_balance = warn_balance
+        self.merge_balance = merge_balance
+        self.min_merge_pairs = min_merge_pairs
+        self.check_interval = check_interval
+
+        self._w3 = None
+        self._usdc = None
+        self._address = None
+        self._initialized = False
+        self._last_check_ts = 0.0
+        self._last_balance = 0.0
+        self._merge_in_progress = False
+        self._total_merged_usdc = 0.0
+        self._total_merges = 0
+
+    async def initialize(self) -> bool:
+        """Initialize web3 connection for balance monitoring."""
+        try:
+            from web3 import Web3
+
+            self._w3 = Web3(Web3.HTTPProvider(self._rpc_url))
+            if not self._w3.is_connected():
+                log.error("balance_monitor_rpc_down", rpc=self._rpc_url)
+                return False
+
+            self._address = self._w3.eth.account.from_key(
+                self._private_key
+            ).address
+
+            # USDC.e balance check ABI
+            usdc_abi = [
+                {
+                    "name": "balanceOf",
+                    "type": "function",
+                    "inputs": [
+                        {"name": "account", "type": "address"},
+                    ],
+                    "outputs": [{"name": "", "type": "uint256"}],
+                }
+            ]
+            self._usdc = self._w3.eth.contract(
+                address=self._w3.to_checksum_address(USDC_ADDRESS),
+                abi=usdc_abi,
+            )
+            self._initialized = True
+            log.info("balance_monitor_initialized",
+                     address=self._address,
+                     warn_at=f"${self.warn_balance:.2f}",
+                     merge_at=f"${self.merge_balance:.2f}")
+            return True
+
+        except ImportError:
+            log.warning("balance_monitor_no_web3",
+                        msg="web3 not installed, balance monitoring disabled")
+            return False
+        except Exception as e:
+            log.error("balance_monitor_init_error", error=str(e))
+            return False
+
+    async def get_usdc_balance(self) -> float:
+        """Get current USDC.e balance in human-readable units."""
+        if not self._initialized:
+            return -1.0
+        try:
+            raw = self._usdc.functions.balanceOf(self._address).call()
+            balance = raw / 1e6  # USDC has 6 decimals
+            self._last_balance = balance
+            return balance
+        except Exception as e:
+            log.error("balance_check_error", error=str(e))
+            return self._last_balance
+
+    async def check_and_merge(self, inventory_mgr,
+                               gasless_merger=None,
+                               ctf_ops=None,
+                               pnl_tracker=None) -> dict:
+        """
+        Check balance and auto-merge if running low.
+        
+        Called from the main quote loop. Returns a status dict.
+        
+        Args:
+            inventory_mgr: InventoryManager with current positions.
+            gasless_merger: GaslessMerger instance (preferred).
+            ctf_ops: CTFOperations instance (fallback, uses gas).
+            pnl_tracker: PnLTracker to record merge profit.
+        """
+        result = {
+            "checked": False,
+            "balance": self._last_balance,
+            "merged": False,
+            "pairs_merged": 0,
+            "usdc_recovered": 0.0,
+        }
+
+        # Throttle checks
+        now = time.time()
+        if now - self._last_check_ts < self.check_interval:
+            return result
+        self._last_check_ts = now
+
+        if not self._initialized or self._merge_in_progress:
+            return result
+
+        balance = await self.get_usdc_balance()
+        result["checked"] = True
+        result["balance"] = balance
+
+        if balance < 0:
+            return result  # Error getting balance
+
+        # Warn level
+        if balance < self.warn_balance:
+            log.warning("low_balance_warning",
+                        balance=f"${balance:.2f}",
+                        threshold=f"${self.warn_balance:.2f}")
+
+        # Merge trigger level
+        if balance >= self.merge_balance:
+            return result  # Balance is fine
+
+        # --- Auto-merge needed ---
+        log.info("auto_merge_triggered",
+                 balance=f"${balance:.2f}",
+                 threshold=f"${self.merge_balance:.2f}")
+
+        self._merge_in_progress = True
+        try:
+            total_pairs = 0
+            total_usdc = 0.0
+
+            for market_id, pos in inventory_mgr.positions.items():
+                pairs = int(pos.matched_pairs())
+                if pairs < self.min_merge_pairs:
+                    continue
+
+                condition_id = market_id
+                usdc_recovery = pairs * 1.0  # 1 pair = $1 USDC
+                pair_profit = pos.matched_pair_profit()
+                amount = int(pairs * 1e6)
+
+                log.info("auto_merge_market",
+                         market=market_id[:12],
+                         pairs=pairs,
+                         expected_usdc=f"${usdc_recovery:.2f}",
+                         pair_profit=f"${pair_profit:.4f}")
+
+                # Try gasless first, then on-chain fallback
+                tx = None
+                if gasless_merger and gasless_merger.is_available:
+                    tx = await gasless_merger.merge_positions(
+                        condition_id, amount
+                    )
+                    if tx:
+                        log.info("auto_merge_gasless_ok",
+                                 market=market_id[:12],
+                                 tx=str(tx)[:16])
+
+                if not tx and ctf_ops:
+                    tx = await ctf_ops.merge_positions(
+                        condition_id, amount
+                    )
+                    if tx:
+                        log.info("auto_merge_onchain_ok",
+                                 market=market_id[:12],
+                                 tx=str(tx)[:16])
+
+                if tx:
+                    total_pairs += pairs
+                    total_usdc += usdc_recovery
+
+                    # Record profit in P&L tracker
+                    if pnl_tracker and pair_profit > 0:
+                        pnl_tracker.record_settlement(
+                            pair_profit, market_id
+                        )
+
+                    # Deduct merged pairs from inventory
+                    avg_yes = pos.yes_avg_entry
+                    avg_no = pos.no_avg_entry
+                    pos.yes_shares -= pairs
+                    pos.no_shares -= pairs
+                    pos.yes_total_cost -= pairs * avg_yes
+                    pos.no_total_cost -= pairs * avg_no
+                    # Clamp to zero to avoid negative dust
+                    pos.yes_shares = max(0, pos.yes_shares)
+                    pos.no_shares = max(0, pos.no_shares)
+                    pos.yes_total_cost = max(0, pos.yes_total_cost)
+                    pos.no_total_cost = max(0, pos.no_total_cost)
+
+                    self._total_merged_usdc += usdc_recovery
+                    self._total_merges += 1
+
+            result["merged"] = total_pairs > 0
+            result["pairs_merged"] = total_pairs
+            result["usdc_recovered"] = total_usdc
+
+            if total_pairs > 0:
+                log.info("auto_merge_complete",
+                         total_pairs=total_pairs,
+                         usdc_recovered=f"${total_usdc:.2f}",
+                         new_balance_est=f"${balance + total_usdc:.2f}",
+                         lifetime_merged=f"${self._total_merged_usdc:.2f}",
+                         lifetime_count=self._total_merges)
+
+        except Exception as e:
+            log.error("auto_merge_error", error=str(e))
+        finally:
+            self._merge_in_progress = False
+
+        return result
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "last_balance": self._last_balance,
+            "total_merged_usdc": self._total_merged_usdc,
+            "total_merges": self._total_merges,
+            "initialized": self._initialized,
+        }
+
+
 class CTFOperations:
     """
     On-chain CTF operations for Polymarket.

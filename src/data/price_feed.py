@@ -134,12 +134,18 @@ class PriceFeed:
             self._reconnect_delay = 1  # Reset on successful connect
             log.info("ws_connected", symbols=self.symbols)
 
-            async for message in ws:
-                if not self._running:
-                    break
+            while self._running:
                 try:
+                    # Application-level watchdog: bookTicker updates 10+ times a second.
+                    # If we receive nothing for 5 seconds, the feed has silently stalled.
+                    message = await asyncio.wait_for(ws.recv(), timeout=5.0)
                     data = json.loads(message)
                     self._process_trade(data)
+                except asyncio.TimeoutError:
+                    log.warning("ws_stall_detected", timeout=5.0, msg="No messages received. Forcing reconnect.")
+                    break  # Break out to trigger reconnect in start() loop
+                except websockets.ConnectionClosed:
+                    break
                 except (json.JSONDecodeError, KeyError) as e:
                     log.debug("ws_parse_error", error=str(e))
 

@@ -23,12 +23,20 @@ credentials:
     ws_url: "wss://stream.binance.com:9443/ws"
     rest_url: "https://api.binance.com/api/v3"
 
+  # Polymarket Builder Program (for gasless merge/split/redeem)
+  # Get credentials at: polymarket.com/settings?tab=builder
+  builder:
+    api_key: "${POLY_BUILDER_API_KEY}"
+    secret: "${POLY_BUILDER_SECRET}"
+    passphrase: "${POLY_BUILDER_PASSPHRASE}"
+    relayer_url: "https://relayer-v2.polymarket.com"
+
 # --- Per-Asset Parameters ---
 assets:
   BTC:
     enabled: true
     symbol: "BTCUSDT"
-    default_sigma: 0.60
+    default_sigma: 0.20
     gamma: 0.40             # Increased from 0.15: much more aggressive skew
     gamma_near_expiry: 0.80
     min_spread: 0.01    # 0.5 ticks ($0.005) per side to get 0.99 combined cost
@@ -42,7 +50,7 @@ assets:
   ETH:
     enabled: true
     symbol: "ETHUSDT"
-    default_sigma: 0.70
+    default_sigma: 0.25
     gamma: 0.15
     gamma_near_expiry: 0.50
     min_spread: 0.01
@@ -114,6 +122,16 @@ dry_run:
   fill_delay_min: 2
   fill_delay_max: 10
   toxicity_multiplier: 2.0
+
+# --- Balance Monitor (live mode only) ---
+# Auto-merges matched pairs when USDC wallet balance drops low.
+# Uses gasless relayer (Builder credentials) → on-chain fallback.
+balance_monitor:
+  enabled: true
+  warn_balance: 20.0       # Log warning when USDC below this
+  merge_balance: 10.0      # Trigger auto-merge when USDC below this
+  min_merge_pairs: 5       # Minimum matched pairs worth merging
+  check_interval: 30.0     # Seconds between balance checks
 
 # --- Logging ---
 logging:
