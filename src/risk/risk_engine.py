@@ -147,6 +147,8 @@ def pre_trade_checks(fair_value: float, quotes, inventory_state,
         combined = quotes.yes_buy_price + quotes.no_buy_price
         if combined >= 1.0 and quotes.yes_buy_size > 0 and quotes.no_buy_size > 0:
             failed.append("no_edge_combined_cost_gte_1")
+        elif combined < 0.90 and quotes.yes_buy_size > 0 and quotes.no_buy_size > 0:
+            failed.append("spread_too_wide_disconnect")
 
     # Only fail on price_too_low if that side is actually active
     if quotes.yes_buy_size > 0 and (quotes.yes_buy_price or 0) <= 0.005:
