@@ -501,6 +501,9 @@ class MarketCycler:
         phase = determine_phase(remaining, self.gc.stop_quoting_seconds,
                                 self.gc.reduce_size_seconds)
 
+        # Get inventory position early for the DEAD_ZONE check
+        pos = self.inventory.get_or_create(market.market_id, self.asset)
+
         if phase == "DEAD_ZONE" and pos.share_imbalance() == 0:
             await self.order_mgr.cancel_market_quotes(market.market_id)
             self._update_dashboard(market, spot, fv, sigma, phase, remaining)
@@ -522,7 +525,6 @@ class MarketCycler:
             )
 
         # 7. Risk check (only cancel THIS market's quotes, not all assets)
-        pos = self.inventory.get_or_create(market.market_id, self.asset)
         current_pnl = pos.mark_to_market(fv) + self.pnl.net_pnl
         if not self.risk_engine.check_stops(current_pnl):
             await self.order_mgr.cancel_market_quotes(market.market_id)
