@@ -1,0 +1,49 @@
+# ============================================================
+# MICRO LIVE CONFIGURATION ($10 Test Mode)
+# ============================================================
+# Use this config to safely test all live functionality with 
+# extremely small order sizes and strict $10 capital limits.
+
+mode: "live"
+
+# --- Credentials ---
+# Ensure your LIVE credentials are set in environment variables or hardcoded below
+credentials:
+  polymarket:
+    private_key: "${POLYMARKET_PK}"
+    api_key: "${CLOB_API_KEY}"
+    api_secret: "${CLOB_SECRET}"
+    api_passphrase: "${CLOB_PASS_PHRASE}"
+    chain_id: 137
+    host: "https://clob.polymarket.com"
+  
+  builder:
+    api_key: "${POLY_BUILDER_API_KEY}"
+    secret: "${POLY_BUILDER_SECRET}"
+    passphrase: "${POLY_BUILDER_PASSPHRASE}"
+    relayer_url: "https://relayer-v2.polymarket.com"
+
+# --- Micro Test Parameters ---
+global:
+  starting_capital: 10
+  total_capital: 10
+  max_capital_per_market: 10
+  reprice_threshold: 0.02
+
+# --- Tiny Order Sizes ---
+assets:
+  BTC:
+    enabled: true
+    max_order_size: 5       # Max 5 shares per quote (~$2.50 risk)
+    soft_limit: 5           # Pause quoting if inventory > 5 shares skewed
+    hard_limit: 10          # Emergency stop if skewed by 10 shares
+    emergency: 15
+    max_dollar_delta: 5
+
+# --- Aggressive Merging for small capital ---
+balance_monitor:
+  enabled: true
+  warn_balance: 4.0         # Warn when USDC drops below $4
+  merge_balance: 2.0        # Trigger auto-merge below $2
+  min_merge_pairs: 5        # Merge as soon as we have 5 matched pairs
+  check_interval: 10.0
