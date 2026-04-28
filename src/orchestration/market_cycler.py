@@ -287,12 +287,71 @@ class MarketCycler:
                                      unmatched_down=unmatched_down,
                                      tx=tx[:16] if tx else "none")
 
+            # Simulate redemption of unmatched tokens in Dry-Run
+            elif not self.ctf and not self.gasless_merger:
+                unmatched_up = pos.yes_shares - pairs
+                unmatched_down = pos.no_shares - pairs
+                
+                if (unmatched_up > 0 or unmatched_down > 0):
+                    # Kick off background task to wait for actual resolution from Polymarket API
+                    asyncio.create_task(self._wait_and_settle_unmatched(market, pos, pairs))
+
             self.pnl.markets_settled += 1
             self.current_market = None
 
         # Reset per-market state for next cycle
         self.quote_engine.reset_params()
         self.risk_engine.reset_for_new_market(self.pnl.net_pnl)
+
+    async def _wait_and_settle_unmatched(self, market: MarketInfo, pos, pairs: int):
+        """Background task to poll Gamma API and wait for actual market resolution."""
+        unmatched_up = pos.yes_shares - pairs
+        unmatched_down = pos.no_shares - pairs
+        
+        log.info("waiting_for_actual_resolution", slug=market.slug)
+        
+        while self._running:
+            await asyncio.sleep(30)
+            try:
+                # Re-fetch market metadata from Gamma API
+                m = await self.discovery._fetch_market(market.asset, int(market.window_start_ts))
+                if not m:
+                    continue
+                    
+                # Market is considered resolved if it's inactive or one token has hit $1.00
+                if not m.active or m.up_price == 1.0 or m.down_price == 1.0:
+                    won_up = False
+                    if m.up_price == 1.0:
+                        won_up = True
+                    elif m.down_price == 1.0:
+                        won_up = False
+                    else:
+                        if not m.active:
+                            won_up = m.up_price > m.down_price
+                        else:
+                            continue
+                            
+                    winning_shares = unmatched_up if won_up else unmatched_down
+                    losing_shares = unmatched_down if won_up else unmatched_up
+                    winner_str = "UP" if won_up else "DOWN"
+                    
+                    cost_of_winning = winning_shares * (pos.yes_avg_entry if won_up else pos.no_avg_entry)
+                    cost_of_losing = losing_shares * (pos.no_avg_entry if won_up else pos.yes_avg_entry)
+                    
+                    revenue = winning_shares * 1.0
+                    net_profit = revenue - cost_of_winning - cost_of_losing
+                    
+                    self.pnl.record_settlement(net_profit, market.market_id)
+                    self.pnl.record_capital_recovery(revenue)
+                    
+                    log.info("dry_run_actual_resolution",
+                             winner=winner_str,
+                             winning_shares=winning_shares,
+                             losing_shares=losing_shares,
+                             pnl=f"${net_profit:.4f}")
+                    break
+            except Exception as e:
+                log.error("wait_and_settle_error", error=str(e))
 
     async def _find_next_market(self) -> Optional[MarketInfo]:
         """Find the next eligible market for this asset."""
@@ -372,6 +431,7 @@ class MarketCycler:
         #   2. Binance 15m candle open (fast, reliable fallback, ~$10-20 off)
         #   3. Current spot (only if window just opened < 30s ago)
         
+        self._has_done_30s_merge = False
         start_price = None
         binance_start_price = None
 
@@ -387,6 +447,20 @@ class MarketCycler:
         binance_start_price = await self.price_feed.fetch_historical_price(
             self.ac.symbol, market.event_start_ts
         )
+        
+        # 3. If Vatic failed, try to calibrate from the Polymarket Orderbook
+        if not start_price and binance_start_price:
+            raw_spot = self.price_feed.get_price(self.ac.symbol)
+            if raw_spot:
+                self.vol_estimator.update(raw_spot, time.time())
+                sigma = self.vol_estimator.sigma_for_model()
+                calibrated = self._calibrate_strike_from_market(market, raw_spot, sigma)
+                if calibrated:
+                    start_price = calibrated
+                    log.info("start_price_from_calibration",
+                             asset=self.asset, price=start_price)
+
+        # 4. Fallback: just use Binance if calibration failed
         if binance_start_price and not start_price:
             start_price = binance_start_price
             log.info("start_price_from_binance",
@@ -632,15 +706,22 @@ class MarketCycler:
                 )
 
         # 15.5. Auto-merge check (live mode: reclaim USDC when balance is low)
+        force_merge = False
+        if remaining <= 30 and not getattr(self, '_has_done_30s_merge', False):
+            force_merge = True
+            self._has_done_30s_merge = True
+
         if self.balance_monitor:
             merge_result = await self.balance_monitor.check_and_merge(
                 inventory_mgr=self.inventory,
                 gasless_merger=self.gasless_merger,
                 ctf_ops=self.ctf,
                 pnl_tracker=self.pnl,
+                force=force_merge
             )
             if merge_result.get("merged"):
-                log.info("auto_merge_during_trading",
+                msg = "auto_merge_end_of_market" if force_merge else "auto_merge_during_trading"
+                log.info(msg,
                          asset=self.asset,
                          pairs=merge_result["pairs_merged"],
                          usdc=f"${merge_result['usdc_recovered']:.2f}")

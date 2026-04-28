@@ -304,26 +304,33 @@ class PriceFeed:
         asset = symbol.lower().replace("usdt", "").replace("usd", "")
         
         try:
+            import asyncio
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    "https://api.vatic.trading/api/v1/targets/timestamp",
-                    params={
-                        "asset": asset,
-                        "type": "15min",
-                        "timestamp": int(timestamp)
-                    },
-                    timeout=5.0,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                
-                price = float(data.get("price", 0))
-                if price > 0:
-                    log.info("vatic_strike_fetched",
-                             asset=asset,
-                             timestamp=int(timestamp),
-                             price=price)
-                    return price
+                for attempt in range(3):
+                    try:
+                        resp = await client.get(
+                            "https://api.vatic.trading/api/v1/targets/timestamp",
+                            params={
+                                "asset": asset,
+                                "type": "15min",
+                                "timestamp": int(timestamp)
+                            },
+                            timeout=15.0,
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        
+                        price = float(data.get("price", 0))
+                        if price > 0:
+                            log.info("vatic_strike_fetched",
+                                     asset=asset,
+                                     timestamp=int(timestamp),
+                                     price=price)
+                            return price
+                    except httpx.HTTPError as e:
+                        if attempt == 2:
+                            raise e
+                        await asyncio.sleep(1.0)
                 return None
                 
         except httpx.HTTPStatusError as e:

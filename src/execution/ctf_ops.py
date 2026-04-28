@@ -407,7 +407,8 @@ class BalanceMonitor:
     async def check_and_merge(self, inventory_mgr,
                                gasless_merger=None,
                                ctf_ops=None,
-                               pnl_tracker=None) -> dict:
+                               pnl_tracker=None,
+                               force: bool = False) -> dict:
         """
         Check balance and auto-merge if running low.
         
@@ -428,10 +429,11 @@ class BalanceMonitor:
         }
 
         # Throttle checks
-        now = time.time()
-        if now - self._last_check_ts < self.check_interval:
-            return result
-        self._last_check_ts = now
+        if not force:
+            now = time.time()
+            if now - self._last_check_ts < self.check_interval:
+                return result
+            self._last_check_ts = now
 
         if not self._initialized or self._merge_in_progress:
             return result
@@ -450,7 +452,7 @@ class BalanceMonitor:
                         threshold=f"${self.warn_balance:.2f}")
 
         # Merge trigger level
-        if balance >= self.merge_balance:
+        if not force and balance >= self.merge_balance:
             return result  # Balance is fine
 
         # --- Auto-merge needed ---
@@ -465,7 +467,7 @@ class BalanceMonitor:
 
             for market_id, pos in inventory_mgr.positions.items():
                 pairs = int(pos.matched_pairs())
-                if pairs < self.min_merge_pairs:
+                if not force and pairs < self.min_merge_pairs:
                     continue
 
                 condition_id = market_id
@@ -816,28 +818,38 @@ class SimulatedBalanceMonitor:
     async def initialize(self) -> bool:
         return True
         
-    async def check_and_merge(self, inventory_mgr, gasless_merger=None, ctf_ops=None, pnl_tracker=None) -> dict:
+    async def check_and_merge(self, inventory_mgr, gasless_merger=None, ctf_ops=None, pnl_tracker=None, force: bool = False) -> dict:
         result = { "checked": False, "balance": 0.0, "merged": False, "pairs_merged": 0, "usdc_recovered": 0.0 }
         if not pnl_tracker: return result
         
         import time
-        now = time.time()
-        if now - self._last_check_ts < self.check_interval: return result
-        self._last_check_ts = now
+        if not force:
+            now = time.time()
+            if now - self._last_check_ts < self.check_interval: return result
+            self._last_check_ts = now
         
         balance = pnl_tracker.current_capital
         self._last_balance = balance
         result["checked"] = True
         result["balance"] = balance
         
-        if balance >= self.merge_balance: return result
+        if not force and balance >= self.merge_balance: return result
+        
+        import asyncio
+        import random
+        
+        # Simulate network/relayer latency for the merge (1.2 - 2.8 seconds)
+        latency_sec = 0.0
+        if not force:
+            latency_sec = round(random.uniform(1.2, 2.8), 2)
+            await asyncio.sleep(latency_sec)
         
         total_pairs = 0
         total_usdc = 0.0
         
         for market_id, pos in inventory_mgr.positions.items():
             pairs = int(pos.matched_pairs())
-            if pairs < self.min_merge_pairs: continue
+            if not force and pairs < self.min_merge_pairs: continue
             
             usdc_recovery = pairs * 1.0
             pair_profit = pos.matched_pair_profit()
@@ -869,8 +881,8 @@ class SimulatedBalanceMonitor:
         result["usdc_recovered"] = total_usdc
         
         if total_pairs > 0:
-            self._merge_message = f"Merged {total_pairs} pairs | +${total_usdc:.2f}"
-            log.info("simulated_auto_merge", pairs=total_pairs, usdc=total_usdc)
+            self._merge_message = f"Merged {total_pairs} pairs | +${total_usdc:.2f} [{latency_sec}s lat]"
+            log.info("simulated_auto_merge", pairs=total_pairs, usdc=total_usdc, latency=latency_sec)
             
         return result
 
