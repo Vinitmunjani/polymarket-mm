@@ -219,11 +219,20 @@ class DryRunExecutor:
             }
             fills.append(fill)
             self.filled_orders.append(fill)
-            to_remove.append(oid)
 
-            log.info("dry_fill", order_id=oid, side=order.side,
-                     price=order.price, size=fill_size,
-                     fv=round(fv, 4), spot=round(self._current_spot, 2), elapsed=f"{elapsed:.1f}s")
+            if fill_size >= order.size:
+                order.filled = True
+                order.fill_time = now
+                to_remove.append(oid)
+                log.info("dry_fill", order_id=oid, side=order.side,
+                         price=order.price, size=fill_size,
+                         fv=round(fv, 4), spot=round(self._current_spot, 2), elapsed=f"{elapsed:.1f}s")
+            else:
+                order.size -= fill_size
+                log.info("dry_partial_fill", order_id=oid, side=order.side,
+                         price=order.price, size=fill_size,
+                         remaining=order.size,
+                         fv=round(fv, 4), spot=round(self._current_spot, 2), elapsed=f"{elapsed:.1f}s")
 
         for oid in to_remove:
             self.open_orders.pop(oid, None)
