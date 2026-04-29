@@ -3,6 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import AssetConfig, BotConfig
+import time
+
+from src.execution.dry_run import DryRunExecutor, SimulatedOrder
 from src.execution.order_manager import OrderManager
 from src.risk.toxicity import FillEdgeTracker, ToxicityMonitor
 from src.strategy.inventory import InventoryManager, InventoryState
@@ -125,3 +128,29 @@ def test_clear_market_removes_position_without_settlement_math():
     inv.record_fill("MARKET2", "yes", 5.0, 0.4)
     inv.clear_market("MARKET2")
     assert "MARKET2" not in inv.positions
+
+
+def test_dry_run_partial_fill_keeps_order_live():
+    executor = DryRunExecutor(min_queue_time=0, max_queue_time=0, partial_fill_chance=1.0)
+    executor.update_fair_value(0.4, 100.0)
+    executor.open_orders["DRY-1"] = SimulatedOrder(
+        order_id="DRY-1",
+        token_id="YES1",
+        side="yes",
+        price=0.5,
+        size=10,
+        placed_at=time.time() - 5,
+    )
+
+    first_fills = executor.check_fills()
+    assert len(first_fills) == 1
+    assert first_fills[0]["size"] < 10
+    assert "DRY-1" in executor.open_orders
+    assert executor.open_orders["DRY-1"].filled is False
+
+    remaining = executor.open_orders["DRY-1"].size
+    executor.partial_fill_chance = 0.0
+    second_fills = executor.check_fills()
+    assert len(second_fills) == 1
+    assert second_fills[0]["size"] == remaining
+    assert "DRY-1" not in executor.open_orders

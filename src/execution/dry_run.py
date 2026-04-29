@@ -204,8 +204,6 @@ class DryRunExecutor:
             if random.random() < self.partial_fill_chance and order.size > 5:
                 fill_size = max(1, int(order.size * random.uniform(0.3, 0.9)))
 
-            order.filled = True
-            order.fill_time = now
             self._total_fills += 1
 
             fill = {
