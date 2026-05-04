@@ -1,0 +1,61 @@
+# ============================================================
+# LIVE $50 SMOKE TEST (2–3 windows)
+# BTC-only, small sizing, early merges, balance-only last 5 minutes.
+# ============================================================
+
+mode: "live"
+
+credentials:
+  polymarket:
+    private_key: "${POLYMARKET_PK}"
+    api_key: "${CLOB_API_KEY}"
+    api_secret: "${CLOB_SECRET}"
+    api_passphrase: "${CLOB_PASS_PHRASE}"
+    chain_id: 137
+    host: "https://clob.polymarket.com"
+
+  builder:
+    api_key: "${POLY_BUILDER_API_KEY}"
+    secret: "${POLY_BUILDER_SECRET}"
+    passphrase: "${POLY_BUILDER_PASSPHRASE}"
+    relayer_url: "https://relayer-v2.polymarket.com"
+
+assets:
+  BTC:
+    enabled: true
+    symbol: "BTCUSDT"
+    default_sigma: 0.20
+    gamma: 0.40
+    gamma_near_expiry: 0.80
+    min_spread: 0.01
+    max_spread: 0.05
+    max_order_size: 2
+    max_dollar_delta: 50
+    soft_limit: 6
+    hard_limit: 10
+    emergency: 14
+    auto_merge_dollar_threshold: 5.0
+
+global:
+  refresh_interval: 0.5
+  # Must be >= 300 to avoid entering DEAD_ZONE before our 5-min balance-only mode.
+  stop_quoting_seconds: 300
+  reduce_size_seconds: 300
+  reprice_threshold: 0.01
+
+  starting_capital: 50
+  total_capital: 50
+  max_capital_per_market: 20
+
+  # ~ $10 max loss total (on $50) per your constraint.
+  max_daily_loss_pct: 0.20
+  max_drawdown_pct: 0.20
+
+  market_discovery_interval: 30
+
+balance_monitor:
+  enabled: true
+  warn_balance: 15.0
+  merge_balance: 10.0
+  min_merge_pairs: 2
+  check_interval: 5.0
