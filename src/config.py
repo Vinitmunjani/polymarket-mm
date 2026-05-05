@@ -34,7 +34,7 @@ class AssetConfig:
 @dataclass
 class GlobalConfig:
     """Global trading parameters."""
-    refresh_interval: int = 1
+    refresh_interval: float = 1.0
     stop_quoting_seconds: int = 120
     reduce_size_seconds: int = 300
     reprice_threshold: float = 0.005

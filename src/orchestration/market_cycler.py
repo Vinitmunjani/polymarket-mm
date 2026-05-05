@@ -926,9 +926,12 @@ class MarketCycler:
             self._update_dashboard(market, spot, fv, sigma, halt_reason if is_halted else phase, remaining)
             return
 
-        # 11.5 Fetch live orderbook to prevent crossing the book
-        book_up = await self.book_reader.get_book(market.token_id_up)
-        book_down = await self.book_reader.get_book(market.token_id_down)
+        # 11.5 Fetch live orderbooks concurrently to prevent crossing the book.
+        # Sequential REST fetches add one extra round-trip to every quote cycle.
+        book_up, book_down = await asyncio.gather(
+            self.book_reader.get_book(market.token_id_up),
+            self.book_reader.get_book(market.token_id_down),
+        )
         best_ask_yes = None
         best_ask_no = None
         if book_up:
