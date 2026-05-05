@@ -268,7 +268,20 @@ class MarketCycler:
                 # 3. Run the quote loop for this market
                 await self._run_market(market)
 
-                # 4. Market ended — settle
+                # 4. Market ended — settle. If the bot is being stopped before
+                # expiry (Ctrl+C/timeout/SIGTERM), do NOT treat the current
+                # inventory as final resolution tail. Just cancel quotes and
+                # leave accounting untouched; otherwise test harness timeouts
+                # pollute outcome/PnL with mid-window inventory.
+                if market.time_remaining > 0:
+                    log.info("market_interrupted_before_expiry",
+                             asset=self.asset,
+                             slug=market.slug,
+                             remaining_s=round(market.time_remaining, 1))
+                    await self.order_mgr.cancel_market_quotes(market.market_id)
+                    break
+
+                # Market actually expired — settle
                 await self._settle_market()
 
                 # 5. Wait for current window to expire, then look for next
