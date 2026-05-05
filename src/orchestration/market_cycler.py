@@ -202,6 +202,12 @@ class MarketCycler:
 
         self._running = False
         self._last_market_slug = None  # Track to detect new market
+        self._quote_event = asyncio.Event()
+
+    def notify_price_update(self):
+        """Wake the quote loop on a fresh price tick, with rate limit in loop."""
+        if self._running and self.current_market:
+            self._quote_event.set()
 
     async def run(self):
         """Main loop: cycle through markets continuously."""
@@ -705,6 +711,7 @@ class MarketCycler:
             if self.risk_engine.halted:
                 self.risk_engine.check_stops(self.pnl.net_pnl)
 
+            cycle_start = time.time()
             try:
                 await self._quote_cycle(market)
             except Exception as e:
@@ -712,7 +719,25 @@ class MarketCycler:
                           asset=self.asset)
                 await self.order_mgr.cancel_market_quotes(market.market_id)
 
-            await asyncio.sleep(self.gc.refresh_interval)
+            # Event-driven wakeup: quote quickly on Binance price ticks, but keep
+            # a hard minimum interval to avoid cancel/repost churn and API spam.
+            min_interval = max(0.05, float(getattr(self.gc, "min_quote_interval", 0.25)))
+            elapsed = time.time() - cycle_start
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+
+            if self._quote_event.is_set():
+                self._quote_event.clear()
+                continue
+
+            self._quote_event.clear()
+            try:
+                await asyncio.wait_for(
+                    self._quote_event.wait(),
+                    timeout=float(self.gc.refresh_interval),
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def _quote_cycle(self, market: MarketInfo):
         """Single quote cycle iteration."""
@@ -926,12 +951,10 @@ class MarketCycler:
             self._update_dashboard(market, spot, fv, sigma, halt_reason if is_halted else phase, remaining)
             return
 
-        # 11.5 Fetch live orderbooks concurrently to prevent crossing the book.
-        # Sequential REST fetches add one extra round-trip to every quote cycle.
-        book_up, book_down = await asyncio.gather(
-            self.book_reader.get_book(market.token_id_up),
-            self.book_reader.get_book(market.token_id_down),
-        )
+        # 11.5 Fetch live orderbooks in one request to prevent crossing the book.
+        books = await self.book_reader.get_books([market.token_id_up, market.token_id_down])
+        book_up = books.get(market.token_id_up)
+        book_down = books.get(market.token_id_down)
         best_ask_yes = None
         best_ask_no = None
         if book_up:

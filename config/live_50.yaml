@@ -39,6 +39,7 @@ assets:
 
 global:
   refresh_interval: 1.0
+  min_quote_interval: 0.25
   # Must be >= 300 to avoid entering DEAD_ZONE before our 5-min balance-only mode.
   stop_quoting_seconds: 300
   reduce_size_seconds: 300

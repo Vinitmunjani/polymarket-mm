@@ -373,6 +373,8 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None, headless: 
         if not asset_name:
             return
         cycler = cycler_by_asset.get(asset_name)
+        if cycler:
+            cycler.notify_price_update()
         spread = getattr(cycler, 'chainlink_spread', 0) if cycler else 0
         adjusted = price + spread
         

@@ -35,6 +35,7 @@ class AssetConfig:
 class GlobalConfig:
     """Global trading parameters."""
     refresh_interval: float = 1.0
+    min_quote_interval: float = 0.25
     stop_quoting_seconds: int = 120
     reduce_size_seconds: int = 300
     reprice_threshold: float = 0.005
@@ -246,6 +247,7 @@ def load_config(config_path: str = "config/default.yaml",
     g = raw.get("global", {})
     config.global_params = GlobalConfig(
         refresh_interval=g.get("refresh_interval", 1),
+        min_quote_interval=g.get("min_quote_interval", 0.25),
         stop_quoting_seconds=g.get("stop_quoting_seconds", 120),
         reduce_size_seconds=g.get("reduce_size_seconds", 300),
         reprice_threshold=g.get("reprice_threshold", 0.005),
