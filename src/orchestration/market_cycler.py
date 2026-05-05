@@ -834,13 +834,18 @@ class MarketCycler:
         #     Uses SHARE COUNT imbalance (Up - Down), not dollar delta
         #     Pass t_normalized for time-aware dynamic thresholds
         imbalance = pos.share_imbalance()
+        # Treat any live-minimum-sized leftover as actionable imbalance immediately.
+        # Auto-merge frees capital, but it must not let the bot keep quoting
+        # two-sided while a directional tail remains.
+        inventory_repair = abs(imbalance) >= min_order_size
         inv_state = self.inventory.get_state(market.market_id, fv, t_norm)
         up_size, down_size = self.inventory.compute_size_adjustment(
             market.market_id, fv, self.quote_engine.max_order_size, t_norm
         )
 
-        # 10.25 Balance-only quoting in the last 5 minutes
-        if balance_only:
+        # 10.25 Balance-only quoting in the last 5 minutes, OR whenever
+        # existing leftover inventory is large enough to matter.
+        if balance_only or inventory_repair:
             if imbalance > 0:
                 # Too many Up shares → quote Down only
                 up_size = 0
@@ -900,7 +905,7 @@ class MarketCycler:
         up_size, down_size = _normalize_quote_sizes(
             up_size,
             down_size,
-            allow_round_up=not (balance_only or phase in ["FINAL_SECONDS", "DEFENSIVE", "DEAD_ZONE"] or is_halted),
+            allow_round_up=not (inventory_repair or balance_only or phase in ["FINAL_SECONDS", "DEFENSIVE", "DEAD_ZONE"] or is_halted),
         )
 
         if up_size == 0 and down_size == 0:
