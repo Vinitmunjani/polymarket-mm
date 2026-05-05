@@ -27,6 +27,21 @@ class DummyExecutor:
         return True
 
 
+class DummyBatchExecutor(DummyExecutor):
+    def __init__(self):
+        super().__init__()
+        self.cancel_batches = []
+        self.place_batches = []
+
+    async def place_buy_orders(self, orders):
+        self.place_batches.append(orders)
+        return {order["side"]: f"OID-{order['side']}" for order in orders}
+
+    async def cancel_orders(self, order_ids):
+        self.cancel_batches.append(order_ids)
+        return True
+
+
 def test_config_validation_rejects_invalid_spreads():
     cfg = BotConfig(
         assets={
@@ -72,6 +87,44 @@ def test_order_manager_places_buy_orders_through_executor():
         ("YES1", 0.45, 10, "yes"),
         ("NO1", 0.44, 8, "no"),
     ]
+
+
+def test_order_manager_batches_cancel_and_replace_when_available():
+    executor = DummyBatchExecutor()
+    om = OrderManager(executor, reprice_threshold=0.01)
+    active = om.get_active("MARKET1")
+    active.yes_order_id = "OLD-YES"
+    active.no_order_id = "OLD-NO"
+    active.yes_price = 0.40
+    active.no_price = 0.40
+    active.yes_size = 5
+    active.no_size = 5
+
+    quotes = SimpleNamespace(
+        yes_buy_price=0.45,
+        no_buy_price=0.44,
+        yes_buy_size=10,
+        no_buy_size=8,
+    )
+
+    import asyncio
+
+    updated = asyncio.run(
+        om.update_quotes(
+            market_id="MARKET1",
+            token_id_yes="YES1",
+            token_id_no="NO1",
+            quotes=quotes,
+        )
+    )
+
+    assert updated is True
+    assert executor.cancel_batches == [["OLD-YES", "OLD-NO"]]
+    assert len(executor.place_batches) == 1
+    assert [o["side"] for o in executor.place_batches[0]] == ["yes", "no"]
+    active = om.get_active("MARKET1")
+    assert active.yes_order_id == "OID-yes"
+    assert active.no_order_id == "OID-no"
 
 
 def test_quote_invariant_combined_cost_below_one():

@@ -82,13 +82,31 @@ class OrderManager:
             return False  # No change needed
 
         # Cancel existing orders if they need repricing
+        cancel_ids = []
         if yes_needs and active.yes_order_id:
-            await self.executor.cancel_order(active.yes_order_id)
+            cancel_ids.append(active.yes_order_id)
             active.yes_order_id = None
+            active.yes_price = None
+            active.yes_size = 0
 
         if no_needs and active.no_order_id:
-            await self.executor.cancel_order(active.no_order_id)
+            cancel_ids.append(active.no_order_id)
             active.no_order_id = None
+            active.no_price = None
+            active.no_size = 0
+
+        total_start = time.perf_counter()
+        cancel_ms = 0.0
+        place_ms = 0.0
+
+        if cancel_ids:
+            cancel_start = time.perf_counter()
+            if hasattr(self.executor, 'cancel_orders'):
+                await self.executor.cancel_orders(cancel_ids)
+            else:
+                for order_id in cancel_ids:
+                    await self.executor.cancel_order(order_id)
+            cancel_ms = (time.perf_counter() - cancel_start) * 1000
 
         # Allow per-side book snapshots (preferred). Fall back to shared
         # book_snapshot for legacy callers.
@@ -97,40 +115,64 @@ class OrderManager:
         if no_book_snapshot is None:
             no_book_snapshot = book_snapshot
 
-        # Place new YES buy if we have a price and size
+        place_specs = []
         if yes_needs and quotes.yes_buy_price and quotes.yes_buy_size > 0:
-            order_id = await self._place_buy(
-                token_id_yes, quotes.yes_buy_price,
-                quotes.yes_buy_size, "yes", yes_book_snapshot
-            )
-            if order_id:
-                active.yes_order_id = order_id
-                active.yes_price = quotes.yes_buy_price
-                active.yes_size = quotes.yes_buy_size
-                updated = True
-            else:
-                active.yes_order_id = None
-                active.yes_price = None
-                active.yes_size = 0
+            place_specs.append({
+                "token_id": token_id_yes,
+                "price": quotes.yes_buy_price,
+                "size": quotes.yes_buy_size,
+                "side": "yes",
+                "book_snapshot": yes_book_snapshot,
+            })
+        elif yes_needs:
+            active.yes_order_id = None
+            active.yes_price = None
+            active.yes_size = 0
 
-        # Place new NO buy if we have a price and size
         if no_needs and quotes.no_buy_price and quotes.no_buy_size > 0:
-            order_id = await self._place_buy(
-                token_id_no, quotes.no_buy_price,
-                quotes.no_buy_size, "no", no_book_snapshot
-            )
-            if order_id:
-                active.no_order_id = order_id
-                active.no_price = quotes.no_buy_price
-                active.no_size = quotes.no_buy_size
-                updated = True
-            else:
-                active.no_order_id = None
-                active.no_price = None
-                active.no_size = 0
+            place_specs.append({
+                "token_id": token_id_no,
+                "price": quotes.no_buy_price,
+                "size": quotes.no_buy_size,
+                "side": "no",
+                "book_snapshot": no_book_snapshot,
+            })
+        elif no_needs:
+            active.no_order_id = None
+            active.no_price = None
+            active.no_size = 0
+
+        placed = {}
+        if place_specs:
+            place_start = time.perf_counter()
+            placed = await self._place_buys(place_specs)
+            place_ms = (time.perf_counter() - place_start) * 1000
+
+        yes_order_id = placed.get("yes")
+        if yes_needs and yes_order_id:
+            active.yes_order_id = yes_order_id
+            active.yes_price = quotes.yes_buy_price
+            active.yes_size = quotes.yes_buy_size
+            updated = True
+
+        no_order_id = placed.get("no")
+        if no_needs and no_order_id:
+            active.no_order_id = no_order_id
+            active.no_price = quotes.no_buy_price
+            active.no_size = quotes.no_buy_size
+            updated = True
 
         if updated:
             active.last_update = time.time()
+
+        if cancel_ids or place_specs:
+            log.info("order_update_latency",
+                     market=market_id[:8],
+                     cancels=len(cancel_ids),
+                     placements=len(place_specs),
+                     cancel_ms=round(cancel_ms, 1),
+                     place_ms=round(place_ms, 1),
+                     total_ms=round((time.perf_counter() - total_start) * 1000, 1))
 
         return updated
 
@@ -173,6 +215,19 @@ class OrderManager:
                     token_id, price, size
                 )
         return None
+
+    async def _place_buys(self, orders: list[dict]) -> dict[str, Optional[str]]:
+        """Place one or more BUY orders, using executor batch API when available."""
+        if hasattr(self.executor, 'place_buy_orders'):
+            return await self.executor.place_buy_orders(orders)
+
+        placed = {}
+        for order in orders:
+            placed[order["side"]] = await self._place_buy(
+                order["token_id"], order["price"], order["size"],
+                order["side"], order.get("book_snapshot")
+            )
+        return placed
 
     def _needs_reprice(self, existing_price: Optional[float],
                        new_price: Optional[float],

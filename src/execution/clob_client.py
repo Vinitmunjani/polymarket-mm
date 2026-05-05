@@ -154,6 +154,73 @@ class ClobClientWrapper:
                      price=price, size=size)
             return None
 
+    async def place_buy_orders(self, orders: list[dict]) -> dict[str, Optional[str]]:
+        """Place multiple BUY orders in one CLOB post_orders request."""
+        if not self._initialized:
+            log.error("client_not_initialized")
+            return {str(o.get("side", i)): None for i, o in enumerate(orders)}
+
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import PartialCreateOrderOptions, PostOrdersArgs
+            from py_clob_client.order_builder.constants import BUY
+
+            opts = PartialCreateOrderOptions(tick_size="0.01", neg_risk=False)
+            post_args = []
+            sides = []
+
+            for spec in orders:
+                side = spec.get("side", "up")
+                order_args = OrderArgs(
+                    token_id=spec["token_id"],
+                    price=spec["price"],
+                    size=spec["size"],
+                    side=BUY,
+                )
+                signed_order = self._client.create_order(order_args, opts)
+                post_args.append(PostOrdersArgs(
+                    signed_order,
+                    OrderType.GTC,
+                    postOnly=True,
+                ))
+                sides.append(side)
+
+            response = self._client.post_orders(post_args)
+            results = response if isinstance(response, list) else response.get("orders", []) if isinstance(response, dict) else []
+
+            placed: dict[str, Optional[str]] = {side: None for side in sides}
+            for idx, side in enumerate(sides):
+                item = results[idx] if idx < len(results) and isinstance(results[idx], dict) else {}
+                order_id = item.get("orderID") or item.get("id")
+                if order_id:
+                    spec = orders[idx]
+                    self.open_orders[order_id] = {
+                        "token_id": spec["token_id"],
+                        "price": spec["price"],
+                        "size": spec["size"],
+                        "side": "BUY",
+                        "token_side": side,
+                        "placed_at": time.time(),
+                    }
+                    placed[side] = order_id
+                    log.info("order_placed", order_id=order_id[:8],
+                             price=spec["price"], size=spec["size"],
+                             token=spec["token_id"][:8], token_side=side,
+                             batch=True)
+                else:
+                    status = item.get("status", "unknown")
+                    spec = orders[idx]
+                    log.info("post_only_rejected", status=status,
+                             price=spec["price"], token=spec["token_id"][:8],
+                             token_side=side, batch=True)
+
+            self._save_orders_state()
+            return placed
+
+        except Exception as e:
+            log.error("batch_order_place_error", error=str(e), count=len(orders))
+            return {str(o.get("side", i)): None for i, o in enumerate(orders)}
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order."""
         if not self._initialized:
@@ -165,6 +232,23 @@ class ClobClientWrapper:
             return True
         except Exception as e:
             log.error("cancel_error", order_id=order_id[:8], error=str(e))
+            return False
+
+    async def cancel_orders(self, order_ids: list[str]) -> bool:
+        """Cancel multiple orders in one CLOB cancel_orders request."""
+        if not self._initialized:
+            return False
+        if not order_ids:
+            return True
+        try:
+            self._client.cancel_orders(order_ids)
+            for order_id in order_ids:
+                self.open_orders.pop(order_id, None)
+            self._save_orders_state()
+            log.info("orders_cancelled", count=len(order_ids))
+            return True
+        except Exception as e:
+            log.error("cancel_orders_error", count=len(order_ids), error=str(e))
             return False
 
     async def cancel_all(self) -> bool:
