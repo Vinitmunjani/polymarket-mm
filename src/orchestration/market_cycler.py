@@ -466,7 +466,7 @@ class MarketCycler:
                 revenue = winning_shares * 1.0
                 net_profit = revenue - cost_of_winning - cost_of_losing
 
-                self.pnl.record_settlement(net_profit, market_id)
+                self.pnl.record_outcome_resolution(net_profit, market_id)
                 self.pnl.record_capital_recovery(revenue)
 
                 log.info(
@@ -475,6 +475,7 @@ class MarketCycler:
                     winner=winner_str,
                     winning_shares=winning_shares,
                     losing_shares=losing_shares,
+                    outcome_pnl=round(net_profit, 4),
                     pnl=f"${net_profit:.4f}",
                 )
 

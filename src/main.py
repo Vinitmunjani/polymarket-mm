@@ -474,6 +474,7 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None, headless: 
         session_pnl._session_start = min(cycler.pnl._session_start for cycler in cyclers)
         for cycler in cyclers:
             session_pnl.settlement_pnl += cycler.pnl.settlement_pnl
+            session_pnl.outcome_pnl += getattr(cycler.pnl, "outcome_pnl", 0.0)
             session_pnl.spread_income += cycler.pnl.spread_income
             session_pnl.total_fees += cycler.pnl.total_fees
             session_pnl.est_rebates += cycler.pnl.est_rebates
@@ -497,6 +498,7 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None, headless: 
     print(f"  Total Shares: {snap.total_shares:.0f}")
     print("-" * 60)
     print(f"  Trading P&L:     ${snap.net_trading_pnl:.4f}")
+    print(f"  Outcome P&L:     ${snap.outcome_pnl:.4f}")
     print(f"  Est. Rebates:    ${snap.est_rebates:.4f}   ")
     print(f"  Rebates/Hour:    ${session_pnl.rebates_per_hour():.4f}")
     print(f"  Net P&L (total): ${snap.net_pnl_with_rebates:.4f}")
