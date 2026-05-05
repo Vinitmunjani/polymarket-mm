@@ -29,7 +29,8 @@ assets:
     gamma_near_expiry: 0.80
     min_spread: 0.01
     max_spread: 0.05
-    max_order_size: 2
+    min_order_size: 5
+    max_order_size: 5
     max_dollar_delta: 50
     soft_limit: 6
     hard_limit: 10
