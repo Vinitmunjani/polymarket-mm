@@ -763,10 +763,17 @@ class MarketCycler:
         # 6. Regime filter
         self.regime_filter.update(fv)
         safe, spread_override = self.regime_filter.is_safe_to_quote()
+        regime_halted = False
         if not safe:
-            await self.order_mgr.cancel_market_quotes(market.market_id)
-            self._update_dashboard(market, spot, fv, sigma, phase, remaining)
-            return
+            # If inventory is imbalanced, do not fully pause quoting. Continue
+            # close-only so the bot can repair exposure instead of freezing while
+            # one side is heavy.
+            if abs(pos.share_imbalance()) >= min_order_size:
+                regime_halted = True
+            else:
+                await self.order_mgr.cancel_market_quotes(market.market_id)
+                self._update_dashboard(market, spot, fv, sigma, phase, remaining)
+                return
         if spread_override:
             self.quote_engine.spread_multiplier = max(
                 self.quote_engine.spread_multiplier, spread_override
@@ -777,12 +784,12 @@ class MarketCycler:
             current_pnl = self.portfolio_pnl_getter()
         else:
             current_pnl = pos.mark_to_market(fv) + self.pnl.net_pnl
-        is_halted = False
-        halt_reason = ""
+        is_halted = regime_halted
+        halt_reason = "REGIME_HALT" if regime_halted else ""
 
         if self.risk_engine.halted or not self.risk_engine.check_stops(current_pnl):
             is_halted = True
-            halt_reason = "HALTED"
+            halt_reason = self.risk_engine.halt_reason or "HALTED"
 
         # 8. Edge tracker reaction
         # This will auto-adjust the quote_engine.spread_multiplier if toxicity is high.
