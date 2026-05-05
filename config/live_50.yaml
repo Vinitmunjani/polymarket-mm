@@ -38,11 +38,11 @@ assets:
     auto_merge_dollar_threshold: 5.0
 
 global:
-  refresh_interval: 0.5
+  refresh_interval: 1.0
   # Must be >= 300 to avoid entering DEAD_ZONE before our 5-min balance-only mode.
   stop_quoting_seconds: 300
   reduce_size_seconds: 300
-  reprice_threshold: 0.01
+  reprice_threshold: 0.03  # sticky live orders: preserve queue priority
 
   starting_capital: 50
   total_capital: 50
