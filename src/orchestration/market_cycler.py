@@ -453,8 +453,11 @@ class MarketCycler:
                 if not m:
                     continue
 
-                # Require inactive to prevent volatility false positives.
-                if m.active:
+                # Require actual Gamma closed/inactive/archived status to prevent
+                # volatility false positives while still supporting markets that
+                # remain active=True after close.
+                resolved = bool(getattr(m, "closed", False) or getattr(m, "archived", False) or not m.active)
+                if not resolved:
                     continue
 
                 up = m.up_price
