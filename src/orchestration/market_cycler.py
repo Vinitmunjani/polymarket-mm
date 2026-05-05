@@ -558,6 +558,7 @@ class MarketCycler:
     async def _run_market(self, market: MarketInfo):
         """Run the quote loop for a single 15-minute market."""
         self._has_done_30s_merge = False
+        self._repair_mode_started_at = None
         start_price = None
         binance_start_price = None
 
@@ -790,6 +791,23 @@ class MarketCycler:
         if self.risk_engine.halted or not self.risk_engine.check_stops(current_pnl):
             is_halted = True
             halt_reason = self.risk_engine.halt_reason or "HALTED"
+
+        if is_halted:
+            if self._repair_mode_started_at is None:
+                self._repair_mode_started_at = now
+            repair_elapsed = now - self._repair_mode_started_at
+            if repair_elapsed > 120:
+                await self.order_mgr.cancel_market_quotes(market.market_id)
+                self._update_dashboard(market, spot, fv, sigma, f"{halt_reason}_REPAIR_TIMEOUT", remaining)
+                return
+
+            # Repair-only during halts must be less aggressive: wider spread + no
+            # oversizing. This reduces getting picked off while still allowing
+            # imbalance repair.
+            self.quote_engine.spread_multiplier = max(self.quote_engine.spread_multiplier, 2.0)
+            self.quote_engine.min_spread = max(self.quote_engine.min_spread, 0.05)
+        else:
+            self._repair_mode_started_at = None
 
         # 8. Edge tracker reaction
         # This will auto-adjust the quote_engine.spread_multiplier if toxicity is high.
