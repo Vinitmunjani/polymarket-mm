@@ -35,7 +35,8 @@ class OrderManager:
     Enforces BUY-only + post_only at this level.
     """
 
-    def __init__(self, executor, reprice_threshold: float = 0.01):
+    def __init__(self, executor, reprice_threshold: float = 0.01,
+                 min_update_interval: float = 0.0):
         """
         Args:
             executor: Either ClobClientWrapper (live) or DryRunExecutor (dry-run).
@@ -43,6 +44,7 @@ class OrderManager:
         """
         self.executor = executor
         self.reprice_threshold = reprice_threshold
+        self.min_update_interval = min_update_interval
         # Active quotes per market
         self.active: dict[str, ActiveQuotes] = {}
 
@@ -66,17 +68,37 @@ class OrderManager:
         active = self.get_active(market_id)
         updated = False
 
-        # Check if YES quote needs repricing
-        yes_needs = self._needs_reprice(
+        # Allow per-side book snapshots (preferred). Fall back to shared
+        # book_snapshot for legacy callers.
+        if yes_book_snapshot is None:
+            yes_book_snapshot = book_snapshot
+        if no_book_snapshot is None:
+            no_book_snapshot = book_snapshot
+
+        # Check if quotes need repricing. Urgent changes are adverse-risk
+        # reductions/removals/crossing-book fixes and are never delayed.
+        yes_needs, yes_urgent = self._reprice_decision(
             active.yes_price, quotes.yes_buy_price,
-            active.yes_size, quotes.yes_buy_size
+            active.yes_size, quotes.yes_buy_size,
+            yes_book_snapshot,
         )
 
-        # Check if NO quote needs repricing
-        no_needs = self._needs_reprice(
+        no_needs, no_urgent = self._reprice_decision(
             active.no_price, quotes.no_buy_price,
-            active.no_size, quotes.no_buy_size
+            active.no_size, quotes.no_buy_size,
+            no_book_snapshot,
         )
+
+        if self.min_update_interval > 0 and active.last_update > 0:
+            elapsed = time.time() - active.last_update
+            if elapsed < self.min_update_interval:
+                # Do not cancel/repost just to improve a bid or increase size
+                # too frequently; that burns queue priority. Still allow
+                # adverse reprices and quote removals immediately.
+                if yes_needs and not yes_urgent:
+                    yes_needs = False
+                if no_needs and not no_urgent:
+                    no_needs = False
 
         if not yes_needs and not no_needs:
             return False  # No change needed
@@ -107,13 +129,6 @@ class OrderManager:
                 for order_id in cancel_ids:
                     await self.executor.cancel_order(order_id)
             cancel_ms = (time.perf_counter() - cancel_start) * 1000
-
-        # Allow per-side book snapshots (preferred). Fall back to shared
-        # book_snapshot for legacy callers.
-        if yes_book_snapshot is None:
-            yes_book_snapshot = book_snapshot
-        if no_book_snapshot is None:
-            no_book_snapshot = book_snapshot
 
         place_specs = []
         if yes_needs and quotes.yes_buy_price and quotes.yes_buy_size > 0:
@@ -252,6 +267,40 @@ class OrderManager:
             return True
 
         return False
+
+    def _reprice_decision(self, existing_price: Optional[float],
+                          new_price: Optional[float],
+                          existing_size: int,
+                          new_size: int,
+                          book_snapshot=None) -> tuple[bool, bool]:
+        """Return (needs_reprice, urgent)."""
+        # Always place if no existing quote; not urgent because there is no
+        # stale risk, but no cooldown applies before first placement anyway.
+        if existing_price is None:
+            return (new_price is not None and new_size > 0), False
+
+        # Remove quote if new is None or zero size. This is urgent because a
+        # risk phase/capital guard decided the quote should not exist.
+        if new_price is None or new_size <= 0:
+            return True, True
+
+        # If our BUY bid crosses/touches best ask, cancel immediately.
+        if book_snapshot is not None and existing_price >= book_snapshot.best_ask:
+            return True, True
+
+        price_delta = new_price - existing_price
+        if abs(price_delta) > self.reprice_threshold:
+            # Lowering a BUY bid reduces adverse selection / overpaying risk.
+            # Raising a BUY bid is just chasing/improving and can be throttled.
+            return True, price_delta < 0
+
+        # To preserve queue position, DO NOT reprice if size merely decreases.
+        # Only reprice if we need significantly MORE size (>50% increase), and
+        # treat that as non-urgent so it can be rate-limited.
+        if existing_size > 0 and new_size > existing_size * 1.5:
+            return True, False
+
+        return False, False
 
     def check_stale_quotes(self, market_id: str,
                             yes_book=None, no_book=None) -> bool:

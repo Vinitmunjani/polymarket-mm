@@ -294,6 +294,7 @@ async def run_bot(config: BotConfig, assets_filter: list[str] = None, headless: 
         asset_order_manager = OrderManager(
             executor=asset_executor,
             reprice_threshold=config.global_params.reprice_threshold,
+            min_update_interval=config.global_params.min_order_update_interval,
         )
 
         # Per-asset inventory manager

@@ -127,6 +127,77 @@ def test_order_manager_batches_cancel_and_replace_when_available():
     assert active.no_order_id == "OID-no"
 
 
+def test_order_manager_throttles_non_urgent_bid_improvements():
+    executor = DummyBatchExecutor()
+    om = OrderManager(executor, reprice_threshold=0.01, min_update_interval=2.0)
+    active = om.get_active("MARKET1")
+    active.yes_order_id = "OLD-YES"
+    active.yes_price = 0.40
+    active.yes_size = 5
+    active.last_update = time.time()
+
+    quotes = SimpleNamespace(
+        yes_buy_price=0.45,  # improving/chasing bid: non-urgent
+        no_buy_price=None,
+        yes_buy_size=5,
+        no_buy_size=0,
+    )
+
+    import asyncio
+
+    updated = asyncio.run(
+        om.update_quotes(
+            market_id="MARKET1",
+            token_id_yes="YES1",
+            token_id_no="NO1",
+            quotes=quotes,
+        )
+    )
+
+    assert updated is False
+    assert executor.cancel_batches == []
+    assert executor.place_batches == []
+    active = om.get_active("MARKET1")
+    assert active.yes_order_id == "OLD-YES"
+    assert active.yes_price == 0.40
+
+
+def test_order_manager_allows_urgent_risk_reductions_during_throttle():
+    executor = DummyBatchExecutor()
+    om = OrderManager(executor, reprice_threshold=0.01, min_update_interval=2.0)
+    active = om.get_active("MARKET1")
+    active.yes_order_id = "OLD-YES"
+    active.yes_price = 0.50
+    active.yes_size = 5
+    active.last_update = time.time()
+
+    quotes = SimpleNamespace(
+        yes_buy_price=0.45,  # lowering bid: urgent adverse-selection reduction
+        no_buy_price=None,
+        yes_buy_size=5,
+        no_buy_size=0,
+    )
+
+    import asyncio
+
+    updated = asyncio.run(
+        om.update_quotes(
+            market_id="MARKET1",
+            token_id_yes="YES1",
+            token_id_no="NO1",
+            quotes=quotes,
+        )
+    )
+
+    assert updated is True
+    assert executor.cancel_batches == [["OLD-YES"]]
+    assert len(executor.place_batches) == 1
+    assert executor.place_batches[0][0]["price"] == 0.45
+    active = om.get_active("MARKET1")
+    assert active.yes_order_id == "OID-yes"
+    assert active.yes_price == 0.45
+
+
 def test_quote_invariant_combined_cost_below_one():
     qe = QuoteEngine()
     quotes = qe.generate_quotes(
