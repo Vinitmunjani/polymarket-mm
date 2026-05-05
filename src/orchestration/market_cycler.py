@@ -336,12 +336,17 @@ class MarketCycler:
                                  tx=str(tx)[:16] if tx else "none")
 
             # Try to redeem any remaining tokens (if market resolved)
-            if self.ctf:
+            if self.ctf or self.gasless_merger:
                 condition_id = getattr(market, 'condition_id', None)
                 if condition_id:
-                    resolved = await self.ctf.is_market_resolved(condition_id)
+                    resolved = await self.ctf.is_market_resolved(condition_id) if self.ctf else False
                     if resolved:
-                        tx = await self.ctf.redeem_positions(condition_id)
+                        tx = None
+                        if self.gasless_merger and self.gasless_merger.is_available:
+                            tx = await self.gasless_merger.redeem_positions(condition_id)
+                        elif self.ctf:
+                            log.error("gasless_redeem_unavailable",
+                                      msg="Gasless redeem unavailable; on-chain fallback disabled by policy")
                         if tx:
                             # Calculate redemption value for unmatched tokens
                             unmatched_up = pos.yes_shares - pairs
