@@ -114,6 +114,93 @@ class UpDownFairValue:
         return (time.time() - self._last_update_ts) > 5.0
 
 
+def compute_inventory_repair_sizes(imbalance: float,
+                                   min_order_size: int,
+                                   max_order_size: int) -> tuple[int, int, str]:
+    """Return (up_size, down_size, mode) for guarded repair quoting.
+
+    Normal repair quotes only the light side. But a sub-minimum tail cannot be
+    repaired directly on Polymarket because live orders must be at least
+    min_order_size shares. For those dust tails, quote a small paired plan:
+    top up the heavy/dust side to a 5-share multiple and quote the opposite side
+    to the same resulting target.
+
+    Example: Down 3 / Up 0 => imbalance=-3. Quote Down 7 and Up 10, so if both
+    fill the book becomes Down 10 / Up 10 instead of carrying unrecoverable dust.
+    """
+    min_order_size = max(1, int(min_order_size or 1))
+    max_order_size = max(min_order_size, int(max_order_size or min_order_size))
+    tail = int(round(abs(imbalance)))
+
+    if tail <= 0:
+        return 0, 0, "flat"
+
+    if tail < min_order_size:
+        # Guardrail: dust normalization is capped to 2x min size (10 shares when
+        # min=5). This is intentionally small and distinct from normal quoting.
+        target = 2 * min_order_size
+        heavy_top_up = target - tail
+        if imbalance > 0:
+            # Too many Up: add Up dust-normalizer, quote matching Down target.
+            return heavy_top_up, target, "dust_up"
+        # Too many Down: add Down dust-normalizer, quote matching Up target.
+        return target, heavy_top_up, "dust_down"
+
+    repair_size = min(max_order_size, tail)
+    if imbalance > 0:
+        return 0, repair_size, "repair_down"
+    return repair_size, 0, "repair_up"
+
+
+def apply_dust_price_guardrails(quotes, mode: str,
+                                best_ask_yes: Optional[float] = None,
+                                best_ask_no: Optional[float] = None):
+    """Favor the repair side and make the dust top-up side less aggressive.
+
+    Dust normalization is not risk-free: if only the heavy-side top-up fills,
+    the bot makes the tail worse. Biasing prices makes the desired opposite-side
+    fill more likely while preserving the combined-cost invariant.
+    """
+    if mode not in ("dust_up", "dust_down"):
+        return quotes
+
+    yes = float(quotes.yes_buy_price or 0)
+    no = float(quotes.no_buy_price or 0)
+    if yes <= 0 or no <= 0:
+        return quotes
+
+    if mode == "dust_up":
+        # Too many Up: Down is the repair side. Pay up for Down, shade Up down.
+        yes -= 0.01
+        no += 0.01
+    else:
+        # Too many Down: Up is the repair side. Pay up for Up, shade Down down.
+        yes += 0.01
+        no -= 0.01
+
+    if best_ask_yes is not None and yes >= best_ask_yes:
+        yes = best_ask_yes - 0.01
+    if best_ask_no is not None and no >= best_ask_no:
+        no = best_ask_no - 0.01
+
+    yes = max(0.01, min(0.99, round(yes, 2)))
+    no = max(0.01, min(0.99, round(no, 2)))
+
+    # Keep the pair edge. If the repair-side bump pushed combined cost too high,
+    # lower the dust/top-up side first, because that is the dangerous fill.
+    if yes + no >= 1.0:
+        if mode == "dust_up":
+            yes = max(0.01, round(0.99 - no, 2))
+        else:
+            no = max(0.01, round(0.99 - yes, 2))
+
+    quotes.yes_buy_price = yes
+    quotes.no_buy_price = no
+    quotes.combined_cost = round(yes + no, 4)
+    quotes.edge_per_pair = round(1.0 - quotes.combined_cost, 4)
+    return quotes
+
+
 class MarketCycler:
     """
     Runs the quote loop for a single asset's 15-minute markets.
@@ -872,30 +959,55 @@ class MarketCycler:
         #     Uses SHARE COUNT imbalance (Up - Down), not dollar delta
         #     Pass t_normalized for time-aware dynamic thresholds
         imbalance = pos.share_imbalance()
-        # Treat any live-minimum-sized leftover as actionable imbalance immediately.
-        # Auto-merge frees capital, but it must not let the bot keep quoting
-        # two-sided while a directional tail remains.
-        inventory_repair = abs(imbalance) >= min_order_size
+        abs_imbalance = abs(imbalance)
+        # Treat any leftover as actionable inventory risk. Live-minimum-sized
+        # leftovers use close-only repair; sub-minimum dust uses a tiny paired
+        # normalization plan because a 1-4 share order is invalid live.
+        inventory_repair = abs_imbalance >= min_order_size
+        dust_normalization = 0 < abs_imbalance < min_order_size
+        close_only_phase = phase in ["FINAL_SECONDS", "DEFENSIVE", "DEAD_ZONE"]
+        repair_mode = "normal"
         inv_state = self.inventory.get_state(market.market_id, fv, t_norm)
         up_size, down_size = self.inventory.compute_size_adjustment(
             market.market_id, fv, self.quote_engine.max_order_size, t_norm
         )
 
-        # 10.25 Balance-only quoting in the last 5 minutes, OR whenever
-        # existing leftover inventory is large enough to matter.
-        if balance_only or inventory_repair:
-            if imbalance > 0:
-                # Too many Up shares → quote Down only
-                up_size = 0
-                down_size = _repair_size(min(self.quote_engine.max_order_size, int(imbalance)))
-            elif imbalance < 0:
-                # Too many Down shares → quote Up only
-                down_size = 0
-                up_size = _repair_size(min(self.quote_engine.max_order_size, int(abs(imbalance))))
+        # 10.25 Inventory repair / dust-normalization overrides normal quoting.
+        # Guardrails:
+        # - no unrelated normal two-sided quoting while carrying a tail
+        # - dust mode is capped at 2x min size by compute_inventory_repair_sizes()
+        # - do not open a two-sided dust plan during halts or close-only phases
+        if dust_normalization and not is_halted and not close_only_phase:
+            up_size, down_size, repair_mode = compute_inventory_repair_sizes(
+                imbalance,
+                min_order_size,
+                self.quote_engine.max_order_size,
+            )
+            log.info(
+                "dust_normalization_quote",
+                market=market.market_id,
+                imbalance=round(imbalance, 4),
+                up_size=up_size,
+                down_size=down_size,
+                mode=repair_mode,
+            )
+        elif balance_only or inventory_repair:
+            if imbalance != 0:
+                up_size, down_size, repair_mode = compute_inventory_repair_sizes(
+                    imbalance,
+                    min_order_size,
+                    self.quote_engine.max_order_size,
+                )
+                # Larger tails are close-only. If a tiny dust tail reaches a
+                # close-only context, cancel instead of making the tail worse.
+                if repair_mode.startswith("dust_"):
+                    up_size = 0
+                    down_size = 0
             else:
-                # Flat → stop quoting cleanly
                 up_size = 0
                 down_size = 0
+
+            if up_size == 0 and down_size == 0:
                 await self.order_mgr.cancel_market_quotes(market.market_id)
                 self._update_dashboard(market, spot, fv, sigma, phase, remaining)
                 return
@@ -976,6 +1088,12 @@ class MarketCycler:
             best_ask_no=best_ask_no,
         )
         quotes.phase = phase
+        quotes = apply_dust_price_guardrails(
+            quotes,
+            repair_mode,
+            best_ask_yes=best_ask_yes,
+            best_ask_no=best_ask_no,
+        )
 
         # 12.5 Capital guardrail (prevents negative capital in dry-run and
         # keeps live sizing within available funds).
@@ -1016,12 +1134,19 @@ class MarketCycler:
                     )
 
             # After capital scaling/backoff, drop any active side that fell below
-            # Polymarket's minimum order size. If nothing remains, stop cleanly.
+            # Polymarket's minimum order size. Dust-normalization is an atomic
+            # paired plan: if either leg is no longer valid, cancel both rather
+            # than leaving a one-sided top-up landmine.
             quotes.yes_buy_size, quotes.no_buy_size = _normalize_quote_sizes(
                 quotes.yes_buy_size,
                 quotes.no_buy_size,
                 allow_round_up=False,
             )
+            if repair_mode.startswith("dust_") and (
+                quotes.yes_buy_size < min_order_size or quotes.no_buy_size < min_order_size
+            ):
+                quotes.yes_buy_size = 0
+                quotes.no_buy_size = 0
         except Exception:
             # Never fail a cycle due to sizing guardrails.
             pass
@@ -1050,6 +1175,7 @@ class MarketCycler:
             quotes=quotes,
             yes_book_snapshot=book_up,
             no_book_snapshot=book_down,
+            repair_mode=repair_mode,
         )
 
         # 15. Process fills (handle both dry-run and live CLOB modes)

@@ -45,6 +45,12 @@ class OrderManager:
         self.executor = executor
         self.reprice_threshold = reprice_threshold
         self.min_update_interval = min_update_interval
+        # Repair quotes are intentionally sticky. The bot is buy-only/post-only,
+        # so imbalance repair depends on resting the light-side bid long enough
+        # to earn queue priority. Chasing every FV/book wiggle cancels exactly
+        # the order we need filled and leaves one-sided inventory into expiry.
+        self.repair_reprice_threshold = max(0.05, reprice_threshold)
+        self.repair_min_update_interval = max(10.0, min_update_interval)
         # Active quotes per market
         self.active: dict[str, ActiveQuotes] = {}
 
@@ -58,7 +64,8 @@ class OrderManager:
                              quotes: QuoteResult,
                              book_snapshot=None,
                              yes_book_snapshot=None,
-                             no_book_snapshot=None) -> bool:
+                             no_book_snapshot=None,
+                             repair_mode: str = "normal") -> bool:
         """
         Update quotes for a market. Only cancel+replace if materially different.
 
@@ -77,21 +84,28 @@ class OrderManager:
 
         # Check if quotes need repricing. Urgent changes are adverse-risk
         # reductions/removals/crossing-book fixes and are never delayed.
+        sticky_repair = repair_mode in ("repair_up", "repair_down")
+        yes_repair_side = repair_mode == "repair_up"
+        no_repair_side = repair_mode == "repair_down"
+
         yes_needs, yes_urgent = self._reprice_decision(
             active.yes_price, quotes.yes_buy_price,
             active.yes_size, quotes.yes_buy_size,
             yes_book_snapshot,
+            sticky_repair=yes_repair_side,
         )
 
         no_needs, no_urgent = self._reprice_decision(
             active.no_price, quotes.no_buy_price,
             active.no_size, quotes.no_buy_size,
             no_book_snapshot,
+            sticky_repair=no_repair_side,
         )
 
-        if self.min_update_interval > 0 and active.last_update > 0:
+        min_interval = self.repair_min_update_interval if sticky_repair else self.min_update_interval
+        if min_interval > 0 and active.last_update > 0:
             elapsed = time.time() - active.last_update
-            if elapsed < self.min_update_interval:
+            if elapsed < min_interval:
                 # Do not cancel/repost just to improve a bid or increase size
                 # too frequently; that burns queue priority. Still allow
                 # adverse reprices and quote removals immediately.
@@ -183,8 +197,13 @@ class OrderManager:
         if cancel_ids or place_specs:
             log.info("order_update_latency",
                      market=market_id[:8],
+                     mode=repair_mode,
                      cancels=len(cancel_ids),
                      placements=len(place_specs),
+                     yes_price=quotes.yes_buy_price,
+                     yes_size=quotes.yes_buy_size,
+                     no_price=quotes.no_buy_price,
+                     no_size=quotes.no_buy_size,
                      cancel_ms=round(cancel_ms, 1),
                      place_ms=round(place_ms, 1),
                      total_ms=round((time.perf_counter() - total_start) * 1000, 1))
@@ -272,7 +291,8 @@ class OrderManager:
                           new_price: Optional[float],
                           existing_size: int,
                           new_size: int,
-                          book_snapshot=None) -> tuple[bool, bool]:
+                          book_snapshot=None,
+                          sticky_repair: bool = False) -> tuple[bool, bool]:
         """Return (needs_reprice, urgent)."""
         # Always place if no existing quote; not urgent because there is no
         # stale risk, but no cooldown applies before first placement anyway.
@@ -289,6 +309,17 @@ class OrderManager:
             return True, True
 
         price_delta = new_price - existing_price
+
+        if sticky_repair:
+            # In repair mode, queue priority is the product. Keep the existing
+            # light-side bid resting unless it is dangerously stale. Small FV
+            # wiggles should not cancel the only order that can flatten us.
+            if abs(price_delta) > self.repair_reprice_threshold:
+                return True, price_delta < 0
+            if existing_size > 0 and new_size > existing_size * 2.0:
+                return True, False
+            return False, False
+
         if abs(price_delta) > self.reprice_threshold:
             # Lowering a BUY bid reduces adverse selection / overpaying risk.
             # Raising a BUY bid is just chasing/improving and can be throttled.
