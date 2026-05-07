@@ -54,7 +54,9 @@ class DryRunExecutor:
 
     def __init__(self, min_queue_time: float = 1.0,
                  max_queue_time: float = 3.0,
-                 partial_fill_chance: float = 0.3):
+                 partial_fill_chance: float = 0.3,
+                 adverse_fill_tolerance: float = 0.03,
+                 max_fair_value_dislocation: float = 0.03):
         """
         Args:
             min_queue_time: Minimum seconds before a fill can occur.
@@ -64,6 +66,13 @@ class DryRunExecutor:
         self.min_queue_time = min_queue_time
         self.max_queue_time = max_queue_time
         self.partial_fill_chance = partial_fill_chance
+        # Dry-run should simulate plausible maker fills near the quoted side's
+        # value, not free lottery tickets or wildly toxic stale-book executions.
+        # Keep fills within a small band around side fair value so matched pair
+        # costs stay live-like (~0.97-0.99), while still allowing mild adverse
+        # selection.
+        self.adverse_fill_tolerance = adverse_fill_tolerance
+        self.max_fair_value_dislocation = max_fair_value_dislocation
 
         self.open_orders: dict[str, SimulatedOrder] = {}
         self.filled_orders: deque = deque(maxlen=500)
@@ -80,6 +89,32 @@ class DryRunExecutor:
         """Called each quote cycle with the latest P(Up) fair value and spot."""
         self._current_fv = fv
         self._current_spot = spot
+
+    def _is_adverse_plausible_fill(self, order: SimulatedOrder, fv: float) -> bool:
+        """Return True if a simulated maker fill is economically plausible.
+
+        A resting BUY should fill mainly when it is near fair value with mild
+        adverse selection. If the bid is far below side value, it is a fantasy
+        fill; if the bid is far above side value, the dry-run book/FV inputs are
+        stale enough that counting the execution as normal maker flow distorts
+        pair P&L.
+
+        The tolerances keep dry-run from being brittle around noisy FV estimates
+        while blocking fantasy fills like YES @ 0.03 when FV=0.99 and stale-book
+        toxic fills like NO @ 0.18 when NO fair value is 0.04.
+        """
+        if order.side == "yes":
+            side_value = fv
+        elif order.side == "no":
+            side_value = 1.0 - fv
+        else:
+            return False
+
+        dislocation = order.price - side_value
+        return (
+            side_value <= order.price + self.adverse_fill_tolerance
+            and dislocation <= self.max_fair_value_dislocation
+        )
 
     async def _simulate_network_latency(self):
         """Simulate realistic Polymarket CLOB API latency."""
@@ -230,6 +265,17 @@ class DryRunExecutor:
                         should_fill = False
 
                 if not should_fill:
+                    continue
+
+                if not self._is_adverse_plausible_fill(order, fv):
+                    log.debug("dry_fantasy_fill_rejected",
+                              order_id=oid,
+                              side=order.side,
+                              price=order.price,
+                              fv=round(fv, 4),
+                              side_value=round(fv if order.side == "yes" else 1.0 - fv, 4),
+                              best_bid=best_bid,
+                              best_ask=best_ask)
                     continue
 
             # --- FV-crossing fallback (when no books are available) ---

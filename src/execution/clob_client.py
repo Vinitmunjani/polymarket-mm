@@ -306,25 +306,59 @@ class ClobClientWrapper:
 
     def process_fills(self, fills: list[dict], inventory_mgr,
                       market_id: str, edge_tracker=None,
-                      current_mid: float = None) -> list[dict]:
-        """Process fills with deduplication and update trackers."""
+                      current_mid: float = None,
+                      token_id_yes: str = "",
+                      token_id_no: str = "") -> list[dict]:
+        """Process fills with deduplication and update trackers.
+
+        Side attribution must not default to YES/UP. Live trade payloads can
+        vary in order-id casing, and fills may arrive after local order context
+        was cleared by restart/reconcile/cancel-all. Prefer current market token
+        IDs when order context is missing.
+        """
         processed = []
         fills_changed = False
         orders_changed = False
         for fill in fills:
-            fill_id = fill.get("id", f"{fill.get('order_id', '')}_{fill.get('size', '')}")
+            order_id = (
+                fill.get("order_id") or fill.get("orderID") or fill.get("orderId")
+                or fill.get("maker_order_id") or fill.get("makerOrderId")
+                or fill.get("taker_order_id") or fill.get("takerOrderId") or ""
+            )
+            token_id = str(
+                fill.get("token_id") or fill.get("tokenID") or fill.get("tokenId")
+                or fill.get("asset_id") or fill.get("assetId") or fill.get("asset") or ""
+            )
+            fill_id = fill.get("id") or fill.get("trade_id") or fill.get("tradeId") or f"{order_id}_{token_id}_{fill.get('size', '')}_{fill.get('price', '')}"
             if fill_id in self._processed_fills:
                 continue
-            self._processed_fills.add(fill_id)
-            fills_changed = True
 
             size = float(fill.get("size", 0))
             price = float(fill.get("price", 0))
-            order_id = fill.get("order_id", "")
 
-            # Determine if this was YES or NO based on our order tracker
             order_ctx = self.open_orders.get(order_id, {})
-            side = order_ctx.get("token_side", "up")
+            side = order_ctx.get("token_side")
+            if not side:
+                ctx_token = str(order_ctx.get("token_id", ""))
+                effective_token = token_id or ctx_token
+                if token_id_yes and effective_token == str(token_id_yes):
+                    side = "yes"
+                elif token_id_no and effective_token == str(token_id_no):
+                    side = "no"
+
+            if side in ("up", "yes"):
+                side = "yes"
+            elif side in ("down", "no"):
+                side = "no"
+            else:
+                log.warning("fill_side_unknown_skipped",
+                            market=market_id[:8],
+                            order_id=order_id[:8] if order_id else "",
+                            token=token_id[:8] if token_id else "")
+                continue
+
+            self._processed_fills.add(fill_id)
+            fills_changed = True
 
             # Update remaining size and remove if filled
             if order_id in self.open_orders:
@@ -333,12 +367,9 @@ class ClobClientWrapper:
                     del self.open_orders[order_id]
                 orders_changed = True
 
-            # Update inventory and edge tracker (MarketCycler loops this)
-            # Actually MarketCycler is expected to handle inventory directly from fills.
-            # So we will just return the standardized fill dict.
             std_fill = {
                 "order_id": order_id,
-                "token_id": order_ctx.get("token_id", ""),
+                "token_id": token_id or order_ctx.get("token_id", ""),
                 "side": side,
                 "price": price,
                 "size": size,

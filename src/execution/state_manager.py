@@ -49,9 +49,26 @@ class StateManager:
             log.error("state_save_error", error=str(e))
 
     def update_inventory(self, positions_dict: Dict[str, Any]):
-        """Store raw dict representation of inventory positions."""
-        self.state["inventory"] = positions_dict
+        """Merge raw dict representation of inventory positions.
+
+        Multiple asset cyclers can share one StateManager while each
+        InventoryManager only mutates a subset of markets. Replacing the whole
+        inventory here lets one asset erase another asset's persisted exposure.
+        """
+        inventory = self.state.get("inventory")
+        if not isinstance(inventory, dict):
+            inventory = {}
+        inventory.update(positions_dict)
+        self.state["inventory"] = inventory
         self.save_state()
+
+    def remove_inventory_market(self, market_id: str):
+        """Remove one market from persisted inventory without touching others."""
+        inventory = self.state.get("inventory")
+        if isinstance(inventory, dict) and market_id in inventory:
+            inventory.pop(market_id, None)
+            self.state["inventory"] = inventory
+            self.save_state()
 
     def update_open_orders(self, open_orders: Dict[str, dict]):
         self.state["open_orders"] = open_orders

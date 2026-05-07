@@ -152,6 +152,32 @@ def compute_inventory_repair_sizes(imbalance: float,
     return repair_size, 0, "repair_up"
 
 
+def should_use_close_only_repair(imbalance: float,
+                                 min_order_size: int,
+                                 hard_limit: float,
+                                 balance_only: bool = False,
+                                 close_only_phase: bool = False,
+                                 is_halted: bool = False) -> bool:
+    """Return True when imbalance should force one-sided repair quoting.
+
+    A single live-minimum fill (usually 5 shares) is normal inventory, not a
+    reason to stop quoting both sides for the rest of the window. The old logic
+    used ``min_order_size`` as the close-only threshold, so one fill flipped the
+    bot into ``repair_up/down`` mode and made the other side size 0. That is why
+    windows often ended with only one side filled instead of mostly matched BTC
+    pairs.
+    """
+    abs_imbalance = abs(float(imbalance or 0.0))
+    min_order_size = max(1, int(min_order_size or 1))
+    hard_limit = max(float(min_order_size), float(hard_limit or min_order_size))
+
+    if abs_imbalance < min_order_size:
+        return False
+    if balance_only or close_only_phase or is_halted:
+        return True
+    return abs_imbalance >= hard_limit
+
+
 def apply_dust_price_guardrails(quotes, mode: str,
                                 best_ask_yes: Optional[float] = None,
                                 best_ask_no: Optional[float] = None):
@@ -412,6 +438,11 @@ class MarketCycler:
                      down_shares=pos.no_shares,
                      matched_pairs=pairs)
 
+            live_mode = bool(self.ctf or self.gasless_merger)
+            live_merge_succeeded = pairs <= 0
+            live_redeem_succeeded = False
+            live_resolved = False
+
             # --- CTF Operations ---
             if pairs > 0:
                 # Use gasless merger if available, else on-chain
@@ -436,17 +467,26 @@ class MarketCycler:
                         pair_profit = pos.matched_pair_profit()
                         self.pnl.record_settlement(pair_profit, market.market_id)
                         self.pnl.record_capital_recovery(pairs * 1.0)
+                        self.inventory.apply_pair_merge(market.market_id, pairs)
+                        live_merge_succeeded = True
+                        # Refresh position after mutating inventory so unmatched
+                        # calculations below reflect confirmed merged pairs.
+                        pos = self.inventory.get_or_create(market.market_id, self.asset)
+                        pairs = pos.matched_pairs()
                         log.info("pairs_merged",
                                  pairs=pairs,
                                  profit=f"${pair_profit:.4f}",
                                  tx=str(tx)[:16] if tx else "none")
+                    elif live_mode:
+                        log.error("pairs_merge_failed_keep_inventory",
+                                  market=market.market_id[:8], pairs=pairs)
 
             # Try to redeem any remaining tokens (if market resolved)
-            if self.ctf or self.gasless_merger:
+            if live_mode:
                 condition_id = getattr(market, 'condition_id', None)
                 if condition_id:
-                    resolved = await self.ctf.is_market_resolved(condition_id) if self.ctf else False
-                    if resolved:
+                    live_resolved = await self.ctf.is_market_resolved(condition_id) if self.ctf else False
+                    if live_resolved:
                         tx = None
                         if self.gasless_merger and self.gasless_merger.is_available:
                             tx = await self.gasless_merger.redeem_positions(condition_id)
@@ -455,15 +495,19 @@ class MarketCycler:
                                       msg="Gasless redeem unavailable; on-chain fallback disabled by policy")
                         if tx:
                             # Calculate redemption value for unmatched tokens
-                            unmatched_up = pos.yes_shares - pairs
-                            unmatched_down = pos.no_shares - pairs
+                            unmatched_up = pos.yes_shares
+                            unmatched_down = pos.no_shares
+                            live_redeem_succeeded = True
                             log.info("tokens_redeemed",
                                      unmatched_up=unmatched_up,
                                      unmatched_down=unmatched_down,
                                      tx=tx[:16] if tx else "none")
+                        else:
+                            log.error("tokens_redeem_failed_keep_inventory",
+                                      market=market.market_id[:8])
 
             # Simulate redemption of unmatched tokens in Dry-Run
-            elif not self.ctf and not self.gasless_merger:
+            elif not live_mode:
                 if pairs > 0:
                     pair_profit = pos.matched_pair_profit()
                     self.pnl.record_settlement(pair_profit, market.market_id)
@@ -506,8 +550,21 @@ class MarketCycler:
                 # Kick off background task to wait for actual resolution from Gamma API
                 asyncio.create_task(self._wait_and_settle_unmatched(market, pos_snapshot))
 
-            # Clear position from inventory state
-            self.inventory.clear_market(market.market_id)
+            # Clear position from inventory state only when all relevant cleanup
+            # succeeded. In live mode, never forget real wallet exposure after a
+            # failed merge/redeem.
+            if not live_mode:
+                self.inventory.clear_market(market.market_id)
+            elif live_resolved and live_merge_succeeded and live_redeem_succeeded:
+                self.inventory.clear_market(market.market_id)
+            elif self.inventory.positions.get(market.market_id) is None:
+                pass
+            else:
+                log.warning("live_inventory_retained_after_settlement",
+                            market=market.market_id[:8],
+                            merge_succeeded=live_merge_succeeded,
+                            resolved=live_resolved,
+                            redeem_succeeded=live_redeem_succeeded)
             
             self.current_market = None
 
@@ -960,12 +1017,22 @@ class MarketCycler:
         #     Pass t_normalized for time-aware dynamic thresholds
         imbalance = pos.share_imbalance()
         abs_imbalance = abs(imbalance)
-        # Treat any leftover as actionable inventory risk. Live-minimum-sized
-        # leftovers use close-only repair; sub-minimum dust uses a tiny paired
-        # normalization plan because a 1-4 share order is invalid live.
-        inventory_repair = abs_imbalance >= min_order_size
+        # A sub-minimum tail cannot be repaired directly live, so it uses a tiny
+        # paired normalization plan. But a normal minimum-sized fill should not
+        # force close-only repair; that made the bot quote one side at size 0 for
+        # most of the window and left inventory unmatched. Use the dynamic hard
+        # limit (or close-only contexts) before forcing one-sided repair.
         dust_normalization = 0 < abs_imbalance < min_order_size
         close_only_phase = phase in ["FINAL_SECONDS", "DEFENSIVE", "DEAD_ZONE"]
+        _soft_threshold, hard_threshold, _emerg_threshold = self.inventory._dynamic_thresholds(t_norm)
+        inventory_repair = should_use_close_only_repair(
+            imbalance,
+            min_order_size,
+            hard_threshold,
+            balance_only=balance_only,
+            close_only_phase=close_only_phase,
+            is_halted=is_halted,
+        )
         repair_mode = "normal"
         inv_state = self.inventory.get_state(market.market_id, fv, t_norm)
         up_size, down_size = self.inventory.compute_size_adjustment(
@@ -1055,7 +1122,7 @@ class MarketCycler:
         up_size, down_size = _normalize_quote_sizes(
             up_size,
             down_size,
-            allow_round_up=not (inventory_repair or balance_only or phase in ["FINAL_SECONDS", "DEFENSIVE", "DEAD_ZONE"] or is_halted),
+            allow_round_up=not (inventory_repair or close_only_phase),
         )
 
         if up_size == 0 and down_size == 0:
@@ -1190,27 +1257,18 @@ class MarketCycler:
             # Live CLOB API
             try:
                 raw_fills = await self.order_mgr.executor.get_fills(market.market_id)
-                fills = self.order_mgr.executor.process_fills(raw_fills, self.inventory, market.market_id)
+                fills = self.order_mgr.executor.process_fills(
+                    raw_fills,
+                    self.inventory,
+                    market.market_id,
+                    token_id_yes=market.token_id_up,
+                    token_id_no=market.token_id_down,
+                )
             except Exception as e:
                 log.error("live_fill_check_error", error=str(e))
 
         for fill in fills:
-            # Record in inventory
-            self.inventory.record_fill(
-                market.market_id, fill["side"],
-                fill["size"], fill["price"], self.asset
-            )
-            # Record in P&L tracker (with rebate calculation)
-            self.pnl.record_fill(
-                size=fill["size"],
-                price=fill["price"],
-                side=fill["side"],
-                asset=self.asset,
-                market_id=market.market_id,
-            )
-            self.edge_tracker.record_fill(
-                fill["side"], fill["price"], fv
-            )
+            self._record_fill_effects(market.market_id, fill, fv)
 
         # 15.5. Auto-merge check: dollar-based threshold OR low balance OR near expiry
         force_merge = False
@@ -1248,6 +1306,23 @@ class MarketCycler:
         # 16. Update dashboard
         self._update_dashboard(market, spot, fv, sigma, halt_reason if is_halted else phase, remaining,
                                 quotes, pos, imbalance, inv_state.value)
+
+    def _record_fill_effects(self, market_id: str, fill: dict, fv: float):
+        """Apply all local side effects for one fill."""
+        self.inventory.record_fill(
+            market_id, fill["side"], fill["size"], fill["price"], self.asset
+        )
+        self.pnl.record_fill(
+            size=fill["size"],
+            price=fill["price"],
+            side=fill["side"],
+            asset=self.asset,
+            market_id=market_id,
+        )
+        self.edge_tracker.record_fill(fill["side"], fill["price"], fv)
+        self.toxicity_monitor.record_fill(
+            fill["side"], fill["price"], fill["size"], fv
+        )
 
     def _update_dashboard_waiting(self):
         if not self._dashboard_cb:

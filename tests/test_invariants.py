@@ -6,11 +6,15 @@ from src.config import AssetConfig, BotConfig
 import time
 
 from src.execution.dry_run import DryRunExecutor, SimulatedOrder
+from src.execution.clob_client import ClobClientWrapper
 from src.execution.order_manager import OrderManager
 from src.orchestration.market_cycler import (
+    MarketCycler,
     apply_dust_price_guardrails,
     compute_inventory_repair_sizes,
+    should_use_close_only_repair,
 )
+from src.execution.state_manager import StateManager
 from src.risk.toxicity import FillEdgeTracker, ToxicityMonitor
 from src.strategy.inventory import InventoryManager, InventoryState
 from src.strategy.quote_engine import QuoteEngine
@@ -297,13 +301,33 @@ def test_dust_normalization_quotes_up_tail_to_ten_each():
     assert down_size == 10
 
 
-def test_normal_repair_remains_close_only_for_live_sized_tail():
+def test_minimum_sized_tail_does_not_force_close_only_repair_mid_window():
+    assert should_use_close_only_repair(
+        imbalance=-5,
+        min_order_size=5,
+        hard_limit=10,
+        balance_only=False,
+        close_only_phase=False,
+        is_halted=False,
+    ) is False
+
+
+
+def test_hard_limit_tail_forces_close_only_repair_mid_window():
+    assert should_use_close_only_repair(
+        imbalance=-10,
+        min_order_size=5,
+        hard_limit=10,
+        balance_only=False,
+        close_only_phase=False,
+        is_halted=False,
+    ) is True
+
     up_size, down_size, mode = compute_inventory_repair_sizes(
-        imbalance=-9,
+        imbalance=-10,
         min_order_size=5,
         max_order_size=5,
     )
-
     assert mode == "repair_up"
     assert up_size == 5
     assert down_size == 0
@@ -434,3 +458,184 @@ def test_dry_run_partial_fill_keeps_order_live():
     assert len(second_fills) == 1
     assert second_fills[0]["size"] == remaining
     assert "DRY-1" not in executor.open_orders
+
+
+def test_dry_run_rejects_fantasy_book_fill_when_side_is_valuable():
+    executor = DryRunExecutor(min_queue_time=0, max_queue_time=0, partial_fill_chance=0.0)
+    # YES is almost certain, so a YES bid at 3c should not magically fill in
+    # dry-run. That was inflating paired P&L by creating impossible cheap legs.
+    executor.update_fair_value(0.99, 100.0)
+    executor.open_orders["DRY-YES"] = SimulatedOrder(
+        order_id="DRY-YES",
+        token_id="YES1",
+        side="yes",
+        price=0.03,
+        size=5,
+        placed_at=time.time() - 5,
+    )
+    book = SimpleNamespace(best_bid=0.03, best_ask=0.03)
+
+    fills = executor.check_fills(yes_book_snapshot=book)
+
+    assert fills == []
+    assert "DRY-YES" in executor.open_orders
+
+
+def test_dry_run_allows_adverse_book_fill_when_side_value_falls():
+    executor = DryRunExecutor(min_queue_time=0, max_queue_time=0, partial_fill_chance=0.0)
+    # YES fell below our bid; this is a plausible adverse maker fill.
+    executor.update_fair_value(0.40, 100.0)
+    executor.open_orders["DRY-YES"] = SimulatedOrder(
+        order_id="DRY-YES",
+        token_id="YES1",
+        side="yes",
+        price=0.42,
+        size=5,
+        placed_at=time.time() - 5,
+    )
+    book = SimpleNamespace(best_bid=0.42, best_ask=0.42)
+
+    fills = executor.check_fills(yes_book_snapshot=book)
+
+    assert len(fills) == 1
+    assert fills[0]["side"] == "yes"
+    assert fills[0]["price"] == 0.42
+
+
+def test_dry_run_rejects_grossly_toxic_stale_book_fill():
+    executor = DryRunExecutor(
+        min_queue_time=0,
+        max_queue_time=0,
+        partial_fill_chance=0.0,
+        max_fair_value_dislocation=0.03,
+    )
+    # NO is worth only 4c, so a NO bid at 18c is a stale-book/toxic
+    # execution artifact. Counting it as normal dry-run maker flow made pair
+    # costs look far cheaper than live.
+    executor.update_fair_value(0.96, 100.0)
+    executor.open_orders["DRY-NO"] = SimulatedOrder(
+        order_id="DRY-NO",
+        token_id="NO1",
+        side="no",
+        price=0.18,
+        size=5,
+        placed_at=time.time() - 5,
+    )
+    book = SimpleNamespace(best_bid=0.18, best_ask=0.18)
+
+    fills = executor.check_fills(no_book_snapshot=book)
+
+    assert fills == []
+    assert "DRY-NO" in executor.open_orders
+
+
+def test_state_manager_inventory_updates_merge_without_erasing_other_assets(tmp_path):
+    state = StateManager(str(tmp_path / "state.json"))
+
+    state.update_inventory({"BTC-MARKET": {"market_id": "BTC-MARKET", "asset": "BTC"}})
+    state.update_inventory({"ETH-MARKET": {"market_id": "ETH-MARKET", "asset": "ETH"}})
+
+    assert set(state.state["inventory"]) == {"BTC-MARKET", "ETH-MARKET"}
+
+    state.remove_inventory_market("BTC-MARKET")
+    assert set(state.state["inventory"]) == {"ETH-MARKET"}
+
+
+def test_live_settlement_keeps_inventory_when_merge_fails():
+    import asyncio
+
+    class DummyOrderManager:
+        async def cancel_market_quotes(self, market_id):
+            return True
+
+    class FailingCtf:
+        async def merge_positions(self, condition_id, amount):
+            return None
+
+        async def is_market_resolved(self, condition_id):
+            return False
+
+    class DummyPnl:
+        net_pnl = 0.0
+
+        def record_settlement(self, *args, **kwargs):
+            raise AssertionError("settlement should not be recorded on failed merge")
+
+        def record_capital_recovery(self, *args, **kwargs):
+            raise AssertionError("capital should not recover on failed merge")
+
+    inv = InventoryManager()
+    inv.record_fill("MARKET1", "yes", 5, 0.40, "BTC")
+    inv.record_fill("MARKET1", "no", 5, 0.50, "BTC")
+
+    cycler = MarketCycler.__new__(MarketCycler)
+    cycler.current_market = SimpleNamespace(
+        market_id="MARKET1",
+        condition_id="COND1",
+        slug="slug",
+    )
+    cycler.asset = "BTC"
+    cycler.order_mgr = DummyOrderManager()
+    cycler.inventory = inv
+    cycler.pnl = DummyPnl()
+    cycler.ctf = FailingCtf()
+    cycler.gasless_merger = None
+    cycler.quote_engine = SimpleNamespace(reset_params=lambda: None)
+    cycler.portfolio_pnl_getter = None
+    cycler.risk_engine = SimpleNamespace(reset_for_new_market=lambda pnl: None)
+
+    asyncio.run(cycler._settle_market())
+
+    assert "MARKET1" in inv.positions
+
+
+def test_live_fill_side_uses_token_id_when_order_context_missing():
+    client = ClobClientWrapper("host", "pk", 137, "key", "secret", "pass")
+    raw = [{
+        "id": "T1",
+        "orderID": "UNKNOWN",
+        "asset_id": "NO-TOKEN",
+        "price": "0.42",
+        "size": "7",
+    }]
+
+    fills = client.process_fills(
+        raw,
+        inventory_mgr=None,
+        market_id="MARKET1",
+        token_id_yes="YES-TOKEN",
+        token_id_no="NO-TOKEN",
+    )
+
+    assert fills == [{
+        "order_id": "UNKNOWN",
+        "token_id": "NO-TOKEN",
+        "side": "no",
+        "price": 0.42,
+        "size": 7.0,
+        "fill_time": fills[0]["fill_time"],
+        "simulated": False,
+    }]
+
+
+def test_fill_recording_feeds_delayed_toxicity_monitor():
+    class DummyPnl:
+        def record_fill(self, **kwargs):
+            self.kwargs = kwargs
+
+    cycler = MarketCycler.__new__(MarketCycler)
+    cycler.asset = "BTC"
+    cycler.inventory = InventoryManager()
+    cycler.pnl = DummyPnl()
+    cycler.edge_tracker = FillEdgeTracker(window=10)
+    cycler.toxicity_monitor = ToxicityMonitor()
+
+    cycler._record_fill_effects(
+        "MARKET1",
+        {"side": "yes", "price": 0.45, "size": 3},
+        fv=0.44,
+    )
+
+    assert len(cycler.edge_tracker.fills) == 1
+    assert len(cycler.toxicity_monitor.fill_history) == 1
+    assert cycler.toxicity_monitor.fill_history[0]["mid_at_fill"] == 0.44

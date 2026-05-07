@@ -462,12 +462,39 @@ class InventoryManager:
         if not pos:
             return 0.0
         pnl = pos.settlement_pnl(outcome_yes) if outcome_yes is not None else 0.0
-        self._save_state()
+        if self.state_manager and hasattr(self.state_manager, "remove_inventory_market"):
+            self.state_manager.remove_inventory_market(market_id)
+        else:
+            self._save_state()
         log.info("market_settled", market=market_id[:8],
                  outcome="YES" if outcome_yes else "NO",
                  pnl=round(pnl, 4), pairs=pos.matched_pairs(),
                  up_shares=pos.yes_shares, down_shares=pos.no_shares)
         return pnl
+
+    def apply_pair_merge(self, market_id: str, pairs: float):
+        """Remove confirmed merged YES/NO pairs while preserving unmatched exposure."""
+        pos = self.positions.get(market_id)
+        if not pos or pairs <= 0:
+            return
+
+        pairs = min(pairs, pos.yes_shares, pos.no_shares)
+        yes_avg = pos.yes_avg_entry
+        no_avg = pos.no_avg_entry
+        pos.yes_shares -= pairs
+        pos.no_shares -= pairs
+        pos.yes_total_cost = max(0.0, pos.yes_total_cost - yes_avg * pairs)
+        pos.no_total_cost = max(0.0, pos.no_total_cost - no_avg * pairs)
+        if pos.yes_shares <= 0.0001:
+            pos.yes_shares = 0.0
+            pos.yes_total_cost = 0.0
+        if pos.no_shares <= 0.0001:
+            pos.no_shares = 0.0
+            pos.no_total_cost = 0.0
+        if pos.yes_shares <= 0 and pos.no_shares <= 0:
+            self.clear_market(market_id)
+        else:
+            self._save_state()
 
     def clear_market(self, market_id: str):
         """Remove a market position from memory/state without computing settlement PnL."""
@@ -476,6 +503,9 @@ class InventoryManager:
             # Return deployed capital to arbiter
             if self.capital_arbiter and pos.asset:
                 self.capital_arbiter.record_recovery(pos.asset, pos.total_cost())
-            self._save_state()
+            if self.state_manager and hasattr(self.state_manager, "remove_inventory_market"):
+                self.state_manager.remove_inventory_market(market_id)
+            else:
+                self._save_state()
             log.info("market_cleared", market=market_id[:8],
                      up_shares=pos.yes_shares, down_shares=pos.no_shares)
