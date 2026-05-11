@@ -11,9 +11,9 @@ credentials:
     api_key: "${CLOB_API_KEY}"
     api_secret: "${CLOB_SECRET}"
     api_passphrase: "${CLOB_PASS_PHRASE}"
-    # Polymarket CLOB wallet mode. New API/deposit-wallet users should use
-    # POLY_1271 = 3 and set funder to the deposit wallet address.
-    signature_type: 3
+    # Polymarket CLOB wallet mode for proxy/funder wallets.
+    # POLY_PROXY = 1; set funder to the proxy/deposit wallet address.
+    signature_type: 1
     funder: "${POLYMARKET_FUNDER}"
     collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
     chain_id: 137
