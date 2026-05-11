@@ -11,6 +11,11 @@ credentials:
     api_key: "${CLOB_API_KEY}"
     api_secret: "${CLOB_SECRET}"
     api_passphrase: "${CLOB_PASS_PHRASE}"
+    # Polymarket CLOB wallet mode. New API/deposit-wallet users should use
+    # POLY_1271 = 3 and set funder to the deposit wallet address.
+    signature_type: 3
+    funder: "${POLYMARKET_FUNDER}"
+    collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
     chain_id: 137
     host: "https://clob.polymarket.com"
 
@@ -18,6 +23,8 @@ credentials:
     api_key: "${POLY_BUILDER_API_KEY}"
     secret: "${POLY_BUILDER_SECRET}"
     passphrase: "${POLY_BUILDER_PASSPHRASE}"
+    relayer_api_key: "${RELAYER_API_KEY}"
+    relayer_api_key_address: "${RELAYER_API_KEY_ADDRESS}"
     relayer_url: "https://relayer-v2.polymarket.com"
 
 assets:
