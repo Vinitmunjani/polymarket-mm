@@ -1,0 +1,101 @@
+# ============================================================
+# LIVE $20 SMOKE TEST
+# BTC-only, 1-window first pass, strict capital/risk limits.
+# Purpose: verify live CLOB placement/cancel/fill/merge path with bounded loss.
+# ============================================================
+
+mode: "live"
+
+credentials:
+  polymarket:
+    private_key: "${POLYMARKET_PK}"
+    api_key: "${CLOB_API_KEY}"
+    api_secret: "${CLOB_SECRET}"
+    api_passphrase: "${CLOB_PASS_PHRASE}"
+    # Proxy/deposit wallet mode. Set POLYMARKET_FUNDER to the funded Polymarket wallet.
+    signature_type: 1
+    funder: "${POLYMARKET_FUNDER}"
+    collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
+    chain_id: 137
+    host: "https://clob.polymarket.com"
+    polygon_rpc_url: "${POLYGON_RPC_URL}"
+
+  binance:
+    ws_url: "wss://stream.binance.com:9443/ws"
+    rest_url: "https://api.binance.com/api/v3"
+
+  builder:
+    api_key: "${POLY_BUILDER_API_KEY}"
+    secret: "${POLY_BUILDER_SECRET}"
+    passphrase: "${POLY_BUILDER_PASSPHRASE}"
+    relayer_api_key: "${RELAYER_API_KEY}"
+    relayer_api_key_address: "${RELAYER_API_KEY_ADDRESS}"
+    relayer_url: "https://relayer-v2.polymarket.com"
+
+assets:
+  BTC:
+    enabled: true
+    symbol: "BTCUSDT"
+    default_sigma: 0.20
+    gamma: 0.45
+    gamma_near_expiry: 0.90
+    min_spread: 0.01
+    max_spread: 0.05
+    min_order_size: 5
+    max_order_size: 5
+    max_dollar_delta: 12
+    soft_limit: 5
+    hard_limit: 10
+    emergency: 12
+    auto_merge_dollar_threshold: 5.0
+
+global:
+  refresh_interval: 1.0
+  min_quote_interval: 0.50
+  min_order_update_interval: 3.0
+  # Stop quoting in final 5 minutes; this is a smoke test, not a hero arc.
+  stop_quoting_seconds: 300
+  reduce_size_seconds: 300
+  # Sticky enough to preserve queue priority and avoid churn.
+  reprice_threshold: 0.03
+
+  starting_capital: 20
+  total_capital: 20
+  max_capital_per_market: 12
+
+  # Hard loss guard for first live run: about $3 max drawdown / $4 daily loss.
+  max_daily_loss_pct: 0.20
+  max_drawdown_pct: 0.15
+
+  market_discovery_interval: 30
+  vol_lookback_seconds: 300
+  kappa_window_seconds: 300
+
+regime:
+  lookback: 30
+  trend_threshold: 0.08
+  spike_threshold: 0.15
+
+toxicity:
+  window_seconds: 300
+  threshold: 0.004
+  edge_adverse_rate: 0.85
+  edge_mean_threshold: 0.015
+  edge_window: 30
+  min_fills_for_halt: 4
+  one_sided_fill_limit: 4
+  immediate_drift_threshold: 0.02
+  halt_cooldown: 120
+
+balance_monitor:
+  enabled: true
+  warn_balance: 12.0
+  merge_balance: 8.0
+  min_merge_pairs: 2
+  check_interval: 5.0
+
+logging:
+  level: "INFO"
+  file: "logs/live_20_smoke.log"
+  console: true
+  json: true
