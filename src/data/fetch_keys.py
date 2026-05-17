@@ -1,49 +1,32 @@
-import sys
-import argparse
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client_v2 import ClobClient
+import os
 
-def fetch_api_credentials(private_key: str, host: str = "https://clob.polymarket.com", chain_id: int = 137) -> ApiCreds:
-    """
-    Fetches or derives L1/L2 API credentials (API key, secret, passphrase) 
-    for the Polymarket CLOB using the provided wallet private key.
-    """
-    try:
-        # Initialize client with just the private key
-        client = ClobClient(
-            host=host,
-            key=private_key,
-            chain_id=chain_id
-        )
-        
-        # Derive or create new API credentials
-        print("Authenticating and deriving L1/L2 API credentials...")
-        creds = client.create_or_derive_api_creds()
-        
-        return creds
-    except Exception as e:
-        print(f"Error fetching API credentials: {str(e)}")
-        sys.exit(1)
+client = ClobClient(
+    host="https://clob.polymarket.com",
+    chain_id=137,  # Polygon mainnet
+    key="0x010564b0228ce5d7773659271a9a154d8c42966ba4c134a6267aa3587a9f25aa"
+)
 
-def main():
-    parser = argparse.ArgumentParser(description="Fetch Polymarket CLOB API Credentials from Private Key")
-    parser.add_argument("--pk", required=True, help="Wallet Private Key (0x...)")
-    parser.add_argument("--host", default="https://clob.polymarket.com", help="CLOB Host URL")
-    parser.add_argument("--chain-id", type=int, default=137, help="Chain ID (137 for Polygon Mainnet)")
-    
-    args = parser.parse_args()
-    
-    creds = fetch_api_credentials(args.pk, args.host, args.chain_id)
-    
-    if creds:
-        print("\n" + "="*50)
-        print("SUCCESS! API Credentials Derived")
-        print("="*50)
-        print(f"API Key:        {creds.api_key}")
-        print(f"API Secret:     {creds.api_secret}")
-        print(f"API Passphrase: {creds.api_passphrase}")
-        print("="*50)
-        print("Copy these values into your config/live.yaml or .env file.")
+# Creates new credentials or derives existing ones
+credentials = client.create_or_derive_api_key()
 
-if __name__ == "__main__":
-    main()
+print(credentials)
+# {
+#     "apiKey": "550e8400-e29b-41d4-a716-446655440000",
+#     "secret": "base64EncodedSecretString",
+#     "passphrase": "randomPassphraseString"
+# }
+from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
+from py_clob_client_v2.order_builder.constants import BUY
+import os
+
+client = ClobClient(
+    host="https://clob.polymarket.com",
+    chain_id=137,
+    key="0x010564b0228ce5d7773659271a9a154d8c42966ba4c134a6267aa3587a9f25aa",
+    creds=credentials,  # Generated from L1 auth, API credentials enable L2 methods
+    signature_type=3,  # POLY_1271, explained below
+    funder="0x5f48a6AECFF273A212CE89704A2b897734f10280"
+)
+
+print(client.signer)

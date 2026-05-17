@@ -8,29 +8,33 @@ mode: "live"
 
 credentials:
   polymarket:
-    private_key: "${POLYMARKET_PK}"
-    api_key: "${CLOB_API_KEY}"
-    api_secret: "${CLOB_SECRET}"
-    api_passphrase: "${CLOB_PASS_PHRASE}"
+    private_key: "0x010564b0228ce5d7773659271a9a154d8c42966ba4c134a6267aa3587a9f25aa"
+    # The deposit wallet is owned by a different key than the trading API key.
+    # The relayer requires the owner's signature for EIP-712 deposit wallet
+    # batches (approvals, merges). This key derives 0xe0F488...
+    owner_private_key: "0x12a817193735327ed2fde5dfea9d07bfb244aed5d02429b743329830b8e5de10"
+    api_key: "8b1ce6d6-0dcb-5caf-9b60-ca4ec4b0ba85"
+    api_secret: "k2PuQyjTz9SDvLCHXh43uBJYht5PKrhX_1Ghu9cwbm0="
+    api_passphrase: "33d6bcbdee83a2c8bdc30e15d3252e30db080740a21645531df0ef2dad4fa113"
     # Deposit wallet flow for current Polymarket API users.
     # Use POLYMARKET_FUNDER as the funded Polymarket deposit wallet address.
     signature_type: 3
-    funder: "${POLYMARKET_FUNDER}"
+    funder: "0x5f48a6AECFF273A212CE89704A2b897734f10280"
     collateral_token: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"  # pUSD
     chain_id: 137
     host: "https://clob.polymarket.com"
-    polygon_rpc_url: "${POLYGON_RPC_URL}"
+    polygon_rpc_url: "https://polygon-rpc.com"
 
   binance:
     ws_url: "wss://stream.binance.com:9443/ws"
     rest_url: "https://api.binance.com/api/v3"
 
   builder:
-    api_key: "${POLY_BUILDER_API_KEY}"
-    secret: "${POLY_BUILDER_SECRET}"
-    passphrase: "${POLY_BUILDER_PASSPHRASE}"
-    relayer_api_key: "${RELAYER_API_KEY}"
-    relayer_api_key_address: "${RELAYER_API_KEY_ADDRESS}"
+    api_key: "019e1c12-98fa-7733-b6fd-530b5fa39e70"
+    secret: "IVQjlJilC2YwF1ukLG3IdxrpmBBZAHc8I0wyYZwcntY="
+    passphrase: "03b9b2de2df3e394d623178178a90be154fca88e9aa6a3f95fbeba8c41ca32e3"
+    relayer_api_key: "019e1b18-d496-7333-b578-63f736528848"
+    relayer_api_key_address: "0x018EF4Ac09E92785c6Ab23513905290F9F7ff2cA"
     relayer_url: "https://relayer-v2.polymarket.com"
 
 assets:
@@ -48,10 +52,10 @@ assets:
     soft_limit: 5
     hard_limit: 10
     emergency: 12
-    auto_merge_dollar_threshold: 5.0
+    auto_merge_dollar_threshold: 20.0
 
 global:
-  refresh_interval: 1.0
+  refresh_interval: 0.25
   min_quote_interval: 0.50
   min_order_update_interval: 3.0
   # Stop quoting in final 5 minutes; this is a smoke test, not a hero arc.
@@ -60,13 +64,13 @@ global:
   # Sticky enough to preserve queue priority and avoid churn.
   reprice_threshold: 0.03
 
-  starting_capital: 20
-  total_capital: 20
+  starting_capital: 50
+  total_capital: 50
   max_capital_per_market: 12
 
   # Hard loss guard for first live run: about $3 max drawdown / $4 daily loss.
-  max_daily_loss_pct: 0.20
-  max_drawdown_pct: 0.15
+  max_daily_loss_pct: 1
+  max_drawdown_pct: 1
 
   market_discovery_interval: 30
   vol_lookback_seconds: 300
@@ -90,8 +94,8 @@ toxicity:
 
 balance_monitor:
   enabled: true
-  warn_balance: 12.0
-  merge_balance: 8.0
+  warn_balance: 5.0
+  merge_balance: 5.0
   min_merge_pairs: 2
   check_interval: 5.0
 
